@@ -1,0 +1,18 @@
+name: mobilepi_shared
+description: MobilePi 共享协议与模型 - 三端通信契约
+publish_to: 'none'
+
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  json_annotation: ^4.9.0
+  logging: ^1.2.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  build_runner: ^2.4.0
+  json_serializable: ^6.8.0
+  test: ^1.25.6

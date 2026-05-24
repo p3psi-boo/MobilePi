@@ -1,0 +1,80 @@
+# ───────────────────────────────────────
+# Nix / Direnv
+# ───────────────────────────────────────
+.direnv/
+.envrc-private
+result
+result-*
+
+# ───────────────────────────────────────
+# Dart / Flutter
+# ───────────────────────────────────────
+.dart_tool/
+.packages
+.pub/
+build/
+flutter_*.png
+.flutter-plugins
+.flutter-plugins-dependencies
+flutter_export_environment.sh
+*.dart.js
+*.js.deps
+*.js.map
+
+# ───────────────────────────────────────
+# Android
+# ───────────────────────────────────────
+android/.gradle/
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/key.properties
+android/local.properties
+android/**/*.iml
+android/captures/
+android/gradlew
+android/gradlew.bat
+android/gradle/wrapper/gradle-wrapper.jar
+
+# ───────────────────────────────────────
+# iOS / iPadOS / macOS
+# ───────────────────────────────────────
+ios/Flutter/.last_build_id
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework/
+ios/Flutter/Flutter.podspec
+ios/ServiceDefinitions.json
+ios/Runner/GeneratedPluginRegistrant.*
+macos/Pods/
+macos/.symlinks/
+macos/Flutter/ephemeral/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# ───────────────────────────────────────
+# IDE / Editor
+# ───────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# ───────────────────────────────────────
+# OS
+# ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ───────────────────────────────────────
+# Secrets / Local Config
+# ───────────────────────────────────────
+*.env
+*.env.local
+config.local.json
+secrets.json

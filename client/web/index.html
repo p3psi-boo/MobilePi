@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="MobilePi">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="MobilePi">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>MobilePi</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      background: #fff7ff;
+      color: #1d1b20;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #app-loader {
+      align-items: center;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      inset: 0;
+      justify-content: center;
+      position: fixed;
+      z-index: 9999;
+    }
+
+    #app-loader-mark {
+      border: 3px solid rgba(103, 80, 164, 0.18);
+      border-top-color: #6750a4;
+      border-radius: 50%;
+      height: 32px;
+      width: 32px;
+      animation: app-loader-spin 900ms linear infinite;
+    }
+
+    #app-loader-text {
+      font-size: 14px;
+      letter-spacing: 0;
+      opacity: 0.72;
+    }
+
+    @keyframes app-loader-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app-loader" role="status" aria-live="polite">
+    <div id="app-loader-mark"></div>
+    <div id="app-loader-text">Loading MobilePi...</div>
+  </div>
+  <script>
+    (function () {
+      var observer;
+      var done = false;
+
+      function removeLoader() {
+        if (done) {
+          return;
+        }
+        done = true;
+        if (observer) {
+          observer.disconnect();
+        }
+        var loader = document.getElementById('app-loader');
+        if (loader) {
+          loader.remove();
+        }
+      }
+
+      function hasFlutterView() {
+        return !!document.querySelector(
+          'flt-glass-pane, flutter-view, flt-scene-host'
+        );
+      }
+
+      window.addEventListener('flutter-first-frame', removeLoader);
+
+      observer = new MutationObserver(function () {
+        if (hasFlutterView()) {
+          removeLoader();
+        }
+      });
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+
+      window.setTimeout(function () {
+        if (hasFlutterView()) {
+          removeLoader();
+        }
+      }, 8000);
+
+      window.setTimeout(function () {
+        var text = document.getElementById('app-loader-text');
+        if (text) {
+          text.textContent = 'MobilePi is still starting...';
+        }
+      }, 12000);
+
+      window.setTimeout(removeLoader, 20000);
+    })();
+  </script>
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

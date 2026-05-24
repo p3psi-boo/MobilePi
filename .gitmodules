@@ -1,0 +1,6 @@
+[submodule "refs/codex"]
+	path = refs/codex
+	url = https://github.com/openai/codex
+[submodule "refs/pi-mono"]
+	path = refs/pi-mono
+	url = https://github.com/badlogic/pi-mono

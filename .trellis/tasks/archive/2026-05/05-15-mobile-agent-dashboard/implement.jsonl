@@ -1,0 +1,8 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": "SPEC.md", "reason": "原始完整需求文档，定义系统三端架构、功能需求、鲁棒性约束"}
+{"file": ".trellis/tasks/05-15-mobile-agent-dashboard/prd.md", "reason": "已收敛的 MVP 需求文档，第一条铁轨实施范围"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层数据流思考指南，防止 Client/Node/Shared 边界错误"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "代码复用检查清单，防止三端重复实现相同逻辑"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端开发指南目录，Node 端需遵循"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端开发指南目录，Client Flutter 端需遵循"}
+{"file": ".trellis/tasks/05-15-mobile-agent-dashboard/research/pi-rpc-protocol.md", "reason": "Pi RPC 协议调研，Node 端 pi --mode rpc 对接方案"}

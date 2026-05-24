@@ -17,6 +17,36 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
     in
     {
+      packages = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+          src = pkgs.lib.cleanSource ./.;
+        in
+        {
+          hub = pkgs.buildDartApplication {
+            pname = "hub";
+            version = "0.1.0";
+            inherit src;
+            sourceRoot = "source/hub";
+            autoPubspecLock = ./hub/pubspec.lock;
+          };
+          daemon = pkgs.buildDartApplication {
+            pname = "daemon";
+            version = "0.1.0";
+            inherit src;
+            sourceRoot = "source/node";
+            autoPubspecLock = ./node/pubspec.lock;
+          };
+          default = pkgs.buildDartApplication {
+            pname = "daemon";
+            version = "0.1.0";
+            inherit src;
+            sourceRoot = "source/node";
+            autoPubspecLock = ./node/pubspec.lock;
+          };
+        }
+      );
+
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs {

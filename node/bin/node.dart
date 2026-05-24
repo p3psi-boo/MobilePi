@@ -16,11 +16,11 @@ void main(List<String> args) async {
   final directPort = firstArg == null ? null : int.tryParse(firstArg);
   final hubUrl =
       firstArg ??
-      Platform.environment['MOBILEPI_HUB_WS_URL'] ??
+      Platform.environment['MOBILE_PI_HUB_WS_URL'] ??
       'ws://localhost:8080/ws';
   final tenantKey = args.length > 1
       ? args[1]
-      : Platform.environment['MOBILEPI_TENANT_KEY'];
+      : Platform.environment['MOBILE_PI_TENANT_KEY'];
 
   final daemon = directPort == null
       ? NodeDaemon(hubUrl: hubUrl, tenantKey: tenantKey)

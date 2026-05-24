@@ -18,9 +18,9 @@ void main(List<String> args) async {
   final port = args.isNotEmpty ? int.tryParse(args.first) ?? 8080 : 8080;
   final tenantKey = args.length > 1
       ? args[1]
-      : Platform.environment['MOBILEPI_TENANT_KEY'];
+      : Platform.environment['MOBILE_PI_TENANT_KEY'];
   if (tenantKey == null || tenantKey.trim().isEmpty) {
-    stderr.writeln('MOBILEPI_TENANT_KEY is required');
+    stderr.writeln('MOBILE_PI_TENANT_KEY is required');
     exit(64);
   }
   final server = HubServer(port: port, tenantKey: tenantKey);

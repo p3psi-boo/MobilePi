@@ -128,9 +128,9 @@ Client connection and returns:
 
 ### Environment wiring
 
-- `MOBILEPI_TENANT_KEY` configures Hub, Node, and Flutter builds.
-- `MOBILEPI_HUB_WS_URL` still configures Hub URL for Node and Client.
-- Local `just hub` / `just daemon` pass `MOBILEPI_TENANT_KEY`; an empty key is a
+- `MOBILE_PI_TENANT_KEY` configures Hub, Node, and Flutter builds.
+- `MOBILE_PI_HUB_WS_URL` still configures Hub URL for Node and Client.
+- Local `just hub` / `just daemon` pass `MOBILE_PI_TENANT_KEY`; an empty key is a
   startup/configuration error for Hub-connected mode.
 
 ### Resume

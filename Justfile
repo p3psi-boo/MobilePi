@@ -1,22 +1,22 @@
 set dotenv-load := true
 set shell := ["bash", "-uc"]
 
-web_host := env_var_or_default("MOBILEPI_WEB_HOST", "127.0.0.1")
-web_port := env_var_or_default("MOBILEPI_WEB_PORT", "8082")
-hub_url := env_var_or_default("MOBILEPI_HUB_WS_URL", "ws://localhost:8080/ws")
-hub_port := env_var_or_default("MOBILEPI_HUB_PORT", "8080")
-tenant_key := env_var_or_default("MOBILEPI_TENANT_KEY", "")
+web_host := env_var_or_default("MOBILE_PI_WEB_HOST", "127.0.0.1")
+web_port := env_var_or_default("MOBILE_PI_WEB_PORT", "8082")
+hub_url := env_var_or_default("MOBILE_PI_HUB_WS_URL", "ws://localhost:8080/ws")
+hub_port := env_var_or_default("MOBILE_PI_HUB_PORT", "8080")
+tenant_key := env_var_or_default("MOBILE_PI_TENANT_KEY", "")
 
 default:
     @just --list
 
 # Start the MobilePi Hub server.
 hub:
-    cd hub && MOBILEPI_TENANT_KEY="{{tenant_key}}" dart run bin/hub.dart {{hub_port}}
+    cd hub && MOBILE_PI_TENANT_KEY="{{tenant_key}}" dart run bin/hub.dart {{hub_port}}
 
 # Start the local Daemon and register it with Hub.
 daemon:
-    cd node && MOBILEPI_TENANT_KEY="{{tenant_key}}" dart run bin/node.dart {{hub_url}}
+    cd node && MOBILE_PI_TENANT_KEY="{{tenant_key}}" dart run bin/node.dart {{hub_url}}
 
 # Start the Flutter web client through flutter run -d web-server.
 client-web:

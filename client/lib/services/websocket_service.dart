@@ -13,10 +13,10 @@ import 'package:mobilepi_shared/mobilepi_shared.dart';
 /// - 断线自动重连（指数退避，最大 30s）
 class WebSocketService {
   static const String _configuredHubUrl = String.fromEnvironment(
-    'MOBILEPI_HUB_WS_URL',
+    'MOBILE_PI_HUB_WS_URL',
   );
   static const String _configuredTenantKey = String.fromEnvironment(
-    'MOBILEPI_TENANT_KEY',
+    'MOBILE_PI_TENANT_KEY',
   );
   static const String _defaultHubUrl = 'ws://localhost:8080/ws';
   static const Duration _heartbeatInterval = Duration(seconds: 30);

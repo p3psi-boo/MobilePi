@@ -214,6 +214,7 @@ class PiSessionMessageInfo {
   final DateTime? timestamp;
   final String? model;
   final UsageInfo? usage;
+  final List<Map<String, dynamic>> parts;
 
   const PiSessionMessageInfo({
     required this.role,
@@ -221,6 +222,7 @@ class PiSessionMessageInfo {
     this.timestamp,
     this.model,
     this.usage,
+    this.parts = const [],
   });
 
   Map<String, dynamic> toJson() => {
@@ -229,6 +231,7 @@ class PiSessionMessageInfo {
     if (timestamp != null) 'timestamp': timestamp!.toUtc().toIso8601String(),
     if (model != null) 'model': model,
     if (usage != null) 'usage': usage!.toJson(),
+    if (parts.isNotEmpty) 'parts': parts,
   };
 }
 

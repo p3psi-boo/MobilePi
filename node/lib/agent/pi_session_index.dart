@@ -151,8 +151,11 @@ class PiSessionIndex {
             final text = role == 'toolResult'
                 ? _toolResultToMarkdown(message, contentBlocks)
                 : _blocksToMarkdown(contentBlocks);
+            final parts = role == 'toolResult'
+                ? _toolResultToParts(message, contentBlocks)
+                : _blocksToParts(contentBlocks);
 
-            if (text.isNotEmpty) {
+            if (text.isNotEmpty || parts.isNotEmpty) {
               final timestamp = _messageTimestampMs(message, entryMap);
               messages.add(
                 PiSessionMessageInfo(
@@ -170,6 +173,7 @@ class PiSessionIndex {
                           Map<String, dynamic>.from(message['usage'] as Map),
                         )
                       : null,
+                  parts: parts,
                 ),
               );
             }
@@ -258,8 +262,11 @@ class PiSessionIndex {
               final text = role == 'toolResult'
                   ? _toolResultToMarkdown(message, contentBlocks)
                   : _blocksToMarkdown(contentBlocks);
+              final parts = role == 'toolResult'
+                  ? _toolResultToParts(message, contentBlocks)
+                  : _blocksToParts(contentBlocks);
 
-              if (text.isNotEmpty) {
+              if (text.isNotEmpty || parts.isNotEmpty) {
                 if (includeMessages) {
                   messages.add(
                     PiSessionMessageInfo(
@@ -277,6 +284,7 @@ class PiSessionIndex {
                               Map<String, dynamic>.from(message['usage'] as Map),
                             )
                           : null,
+                      parts: parts,
                     ),
                   );
                 }
@@ -339,7 +347,58 @@ class PiSessionIndex {
         .trim();
 
     final status = isError ? '失败' : '成功';
+    // Keep text for backward compat, but structured parts are authoritative.
     return '<tool_result name="$toolName" status="$status">\n$text\n</tool_result>';
+  }
+
+  /// Build structured parts from Pi JSONL content blocks.
+  static List<Map<String, dynamic>> _blocksToParts(
+    List<Map<String, dynamic>> blocks,
+  ) {
+    final parts = <Map<String, dynamic>>[];
+    for (final block in blocks) {
+      final type = block['type'];
+      if (type == 'text') {
+        final text = block['text']?.toString();
+        if (text != null && text.isNotEmpty) {
+          parts.add({'type': 'text', 'text': text});
+        }
+      } else if (type == 'thinking') {
+        final thinking = block['thinking']?.toString();
+        if (thinking != null && thinking.isNotEmpty) {
+          parts.add({'type': 'thinking', 'text': thinking});
+        }
+      } else if (type == 'toolCall') {
+        final name = block['name']?.toString();
+        if (name != null && name.isNotEmpty) {
+          parts.add({'type': 'toolCall', 'name': name});
+        }
+      }
+    }
+    return parts;
+  }
+
+  /// Build structured parts for a toolResult message.
+  static List<Map<String, dynamic>> _toolResultToParts(
+    Map<String, dynamic> message,
+    List<Map<String, dynamic>> blocks,
+  ) {
+    final toolName = message['toolName']?.toString();
+    if (toolName == null || toolName.isEmpty) return const [];
+    final isError = message['isError'] == true;
+    final text = blocks
+        .where((b) => b['type'] == 'text')
+        .map((b) => b['text']?.toString() ?? '')
+        .join('\n')
+        .trim();
+    return [
+      {
+        'type': 'toolResult',
+        'name': toolName,
+        'status': isError ? '失败' : '成功',
+        'text': text,
+      },
+    ];
   }
 
   static String _blocksToMarkdown(List<Map<String, dynamic>> blocks) {

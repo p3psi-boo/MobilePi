@@ -155,12 +155,72 @@ class PiSessionInfo {
   }
 }
 
+/// A structured content block within a Pi message.
+enum MessagePartType { text, thinking, toolCall, toolResult, skill }
+
+class MessagePart {
+  final MessagePartType type;
+  final String? text;
+  final String? name;
+  final String? status;
+
+  const MessagePart.text(this.text)
+    : type = MessagePartType.text,
+      name = null,
+      status = null;
+
+  const MessagePart.thinking(this.text)
+    : type = MessagePartType.thinking,
+      name = null,
+      status = null;
+
+  const MessagePart.toolCall(this.name)
+    : type = MessagePartType.toolCall,
+      text = null,
+      status = null;
+
+  const MessagePart.toolResult({this.name, this.status, this.text})
+    : type = MessagePartType.toolResult;
+
+  factory MessagePart.fromJson(Map<String, dynamic> json) {
+    final t = json['type']?.toString();
+    return switch (t) {
+      'thinking' => MessagePart.thinking(json['text']?.toString()),
+      'toolCall' => MessagePart.toolCall(json['name']?.toString()),
+      'toolResult' => MessagePart.toolResult(
+          name: json['name']?.toString(),
+          status: json['status']?.toString(),
+          text: json['text']?.toString(),
+        ),
+      _ => MessagePart.text(json['text']?.toString()),
+    };
+  }
+
+  Map<String, dynamic> toJson() {
+    return switch (type) {
+      MessagePartType.text => {'type': 'text', 'text': text},
+      MessagePartType.thinking => {'type': 'thinking', 'text': text},
+      MessagePartType.toolCall => {'type': 'toolCall', 'name': name},
+      MessagePartType.toolResult => {
+        'type': 'toolResult',
+        'name': name,
+        'status': status,
+        'text': text,
+      },
+      MessagePartType.skill => {'type': 'skill', 'name': name},
+    };
+  }
+}
+
 class PiSessionMessageInfo {
   final String role;
   final String text;
   final DateTime? timestamp;
   final String? model;
   final UsageInfo? usage;
+  /// Structured content blocks — the authoritative data source for rendering.
+  /// When non-empty, clients should use these instead of regex-parsing [text].
+  final List<MessagePart> parts;
 
   const PiSessionMessageInfo({
     required this.role,
@@ -168,6 +228,7 @@ class PiSessionMessageInfo {
     this.timestamp,
     this.model,
     this.usage,
+    this.parts = const [],
   });
 
   factory PiSessionMessageInfo.fromJson(Map<String, dynamic> json) {
@@ -179,6 +240,11 @@ class PiSessionMessageInfo {
       usage: json['usage'] is Map
           ? UsageInfo.fromJson(Map<String, dynamic>.from(json['usage'] as Map))
           : null,
+      parts: (json['parts'] as List<dynamic>?)
+              ?.whereType<Map>()
+              .map((e) => MessagePart.fromJson(Map<String, dynamic>.from(e)))
+              .toList() ??
+          const [],
     );
   }
 

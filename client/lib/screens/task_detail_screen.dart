@@ -566,6 +566,7 @@ List<Widget> _buildStreamingTextWidgets(
   bool isFinal = true,
 }) {
   final theme = Theme.of(context);
+  final cs = theme.colorScheme;
   final text = streamingText.length <= _maxRenderedStreamingChars
       ? streamingText
       : streamingText.substring(streamingText.length - _maxRenderedStreamingChars);
@@ -638,6 +639,85 @@ Widget _buildStreamingToolChips(
 }
 
 /// Transient status label (compaction, retry, etc.).
+/// Render structured MessagePart list from historical messages.
+/// No regex involved — parts come directly from Pi JSONL parsing.
+List<Widget> _buildHistoryPartWidgets(
+  BuildContext context,
+  List<MessagePart> parts, {
+  bool isFinal = true,
+}) {
+  final theme = Theme.of(context);
+  final cs = theme.colorScheme;
+  final widgets = <Widget>[];
+
+  int i = 0;
+  while (i < parts.length) {
+    final part = parts[i];
+
+    switch (part.type) {
+      case MessagePartType.text:
+        if (part.text != null && part.text!.trim().isNotEmpty) {
+          widgets.add(
+            RepaintBoundary(
+              key: ValueKey('ht_$i'),
+              child: PiMarkdown(
+                part.text!,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  height: 1.6,
+                  color: cs.onSurface.withValues(alpha: 0.85),
+                ),
+              ),
+            ),
+          );
+        }
+        break;
+      case MessagePartType.thinking:
+        if (part.text != null && part.text!.trim().isNotEmpty) {
+          widgets.add(
+            RepaintBoundary(
+              key: ValueKey('hthink_$i'),
+              child: _ThinkingBlock(text: part.text!),
+            ),
+          );
+        }
+        break;
+      case MessagePartType.toolCall:
+        // For historical messages, toolCall without inline result is normal
+        // — the result is a separate JSONL message.  Show a simple chip.
+        widgets.add(
+          _ToolChip(
+            key: ValueKey('htc_$i'),
+            toolName: part.name ?? '?',
+            status: '成功', // historical toolCalls always succeeded
+          ),
+        );
+        break;
+      case MessagePartType.toolResult:
+        widgets.add(
+          _ToolChip(
+            key: ValueKey('htr_$i'),
+            toolName: part.name ?? '?',
+            status: part.status,
+            content: part.text,
+          ),
+        );
+        break;
+      case MessagePartType.skill:
+        widgets.add(
+          _ToolChip(
+            key: ValueKey('hsk_$i'),
+            toolName: part.name ?? '?',
+            status: 'skill',
+          ),
+        );
+        break;
+    }
+    i++;
+  }
+
+  return widgets;
+}
+
 class _StatusLabel extends StatelessWidget {
   final String label;
   const _StatusLabel({required this.label});
@@ -786,6 +866,12 @@ class _MessagePartsParser {
     int lastIndex = 0;
     var lastToolCallName = '';
 
+    // If this text contains [工具: name] but NO <tool_result>, the results
+    // arrive as separate JSONL messages.  Skip toolCall parts to avoid
+    // rendering orphan "failed" chips — the toolResult message will render
+    // its own chip.
+    final hasToolResults = text.contains('<tool_result');
+
     final matches = _allMarkersRegex.allMatches(text);
     for (final match in matches) {
       if (match.start > lastIndex) {
@@ -804,7 +890,11 @@ class _MessagePartsParser {
             _toolRegex.firstMatch(matchText)?.group(1) ?? 'unknown';
         if (toolName != lastToolCallName) {
           lastToolCallName = toolName;
-          parts.add(_MessagePart.toolCall(toolName));
+          // Only emit toolCall when matching toolResult exists in same text.
+          // Otherwise the result comes as a separate JSONL message.
+          if (hasToolResults) {
+            parts.add(_MessagePart.toolCall(toolName));
+          }
         }
       } else if (matchText.startsWith('<tool_result')) {
         lastToolCallName = '';
@@ -1048,8 +1138,25 @@ class _MessageItem extends StatelessWidget {
     } else {
       final isToolResult = message.role == 'toolResult';
 
-      // toolResult 角色的消息（独立 JSONL 条目）直接静默渲染内容，不显示 header
+      // Use structured parts when available (no regex parsing needed).
+      final hasStructuredParts = message.parts.isNotEmpty;
+
       if (isToolResult) {
+        if (hasStructuredParts) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 4, left: 4, right: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: _buildHistoryPartWidgets(
+                context,
+                message.parts,
+                isFinal: isFinal,
+              ),
+            ),
+          );
+        }
+        // Fallback for old messages without parts
         final parsedParts = _MessagePartsParser.parse(message.text);
         return Padding(
           padding: const EdgeInsets.only(bottom: 4, left: 4, right: 16),
@@ -1064,8 +1171,6 @@ class _MessageItem extends StatelessWidget {
           ),
         );
       }
-
-      final parsedParts = _MessagePartsParser.parse(message.text);
 
       final label = modelName != null && modelName!.isNotEmpty
           ? modelName!
@@ -1105,7 +1210,18 @@ class _MessageItem extends StatelessWidget {
               ),
               const SizedBox(height: 8),
             ],
-            ..._buildMessagePartWidgets(context, parsedParts, isFinal: isFinal),
+            if (hasStructuredParts)
+              ..._buildHistoryPartWidgets(
+                context,
+                message.parts,
+                isFinal: isFinal,
+              )
+            else
+              ..._buildMessagePartWidgets(
+                context,
+                _MessagePartsParser.parse(message.text),
+                isFinal: isFinal,
+              ),
           ],
         ),
       );

@@ -34,6 +34,7 @@ class _SessionWatchState {
   int offset;
   String partial = '';
   final Set<String> recentFingerprints = <String>{};
+  StreamSubscription<FileSystemEvent>? subscription;
 }
 
 class NodeDaemon {
@@ -61,7 +62,6 @@ class NodeDaemon {
   final Map<String, String> _taskInstanceIds = {};
   final Map<String, String> _taskModels = {};
   final Map<String, _SessionWatchState> _sessionWatchesByTask = {};
-  Timer? _sessionWatchTimer;
   PiCapabilities _piCapabilities = PiCapabilities.empty;
   DateTime? _piCapabilitiesLoadedAt;
   Future<void>? _piCapabilitiesRefresh;
@@ -220,8 +220,9 @@ class NodeDaemon {
     _stopping = true;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    _sessionWatchTimer?.cancel();
-    _sessionWatchTimer = null;
+    for (final watch in _sessionWatchesByTask.values) {
+      watch.subscription?.cancel();
+    }
     _sessionWatchesByTask.clear();
     for (final subscription in _runnerSubs.values) {
       await subscription.cancel();
@@ -951,53 +952,76 @@ class NodeDaemon {
     final file = File(sessionPath);
     final existing = _sessionWatchesByTask[taskId];
     if (existing != null && existing.sessionPath == sessionPath) return;
-    _sessionWatchesByTask[taskId] = _SessionWatchState(
+
+    if (existing != null) {
+      existing.subscription?.cancel();
+    }
+
+    final state = _SessionWatchState(
       taskId: taskId,
       sessionPath: sessionPath,
       offset: file.existsSync() ? file.lengthSync() : 0,
     );
-    _sessionWatchTimer ??= Timer.periodic(
-      const Duration(milliseconds: 1200),
-      (_) => _pollSessionWatches(),
-    );
+    _sessionWatchesByTask[taskId] = state;
+
+    // Ensure the file exists so we can watch it reliably
+    if (!file.existsSync()) {
+      try {
+        file.createSync(recursive: true);
+      } catch (e) {
+        _logger.warning('event=session.watch_file_create_failed path=$sessionPath', e);
+      }
+    }
+
+    try {
+      state.subscription = file.watch(events: FileSystemEvent.modify).listen(
+        (_) => _onSessionFileChanged(state),
+        onError: (Object e) {
+          _logger.warning('event=session.watch_error taskId=$taskId path=$sessionPath', e);
+        },
+      );
+      _logger.info('event=session.watch_started taskId=${shortId(taskId)} path=$sessionPath');
+    } catch (e) {
+      _logger.warning('event=session.watch_setup_failed taskId=$taskId path=$sessionPath', e);
+    }
   }
 
-  Future<void> _pollSessionWatches() async {
-    if (_stopping || _sessionWatchesByTask.isEmpty) return;
-    for (final watch in _sessionWatchesByTask.values) {
-      final file = File(watch.sessionPath);
-      if (!file.existsSync()) continue;
-      final len = file.lengthSync();
-      if (len < watch.offset) {
-        watch.offset = 0;
-        watch.partial = '';
-      }
-      if (len == watch.offset) continue;
-      final raf = await file.open();
-      try {
-        await raf.setPosition(watch.offset);
-        final bytes = await raf.read(len - watch.offset);
-        watch.offset = len;
-        final chunk = watch.partial + utf8.decode(bytes, allowMalformed: true);
-        final lines = chunk.split('\n');
-        watch.partial = lines.removeLast();
-        for (final line in lines) {
-          final delta = _extractDeltaFromSessionLine(line);
-          if (delta == null || delta.isEmpty) continue;
-          final sig = '${watch.taskId}:${delta.hashCode}';
-          if (!watch.recentFingerprints.add(sig)) continue;
-          if (watch.recentFingerprints.length > 300) {
-            watch.recentFingerprints.remove(watch.recentFingerprints.first);
-          }
-          _broadcastTaskUpdate(
-            watch.taskId,
-            'running',
-            streamingDelta: delta,
-          );
+  Future<void> _onSessionFileChanged(_SessionWatchState watch) async {
+    if (_stopping) return;
+    final file = File(watch.sessionPath);
+    if (!file.existsSync()) return;
+    final len = file.lengthSync();
+    if (len < watch.offset) {
+      watch.offset = 0;
+      watch.partial = '';
+    }
+    if (len == watch.offset) return;
+    final raf = await file.open();
+    try {
+      await raf.setPosition(watch.offset);
+      final bytes = await raf.read(len - watch.offset);
+      watch.offset = len;
+      final chunk = watch.partial + utf8.decode(bytes, allowMalformed: true);
+      final lines = chunk.split('\n');
+      watch.partial = lines.removeLast();
+      for (final line in lines) {
+        final delta = _extractDeltaFromSessionLine(line);
+        if (delta == null || delta.isEmpty) continue;
+        final sig = '${watch.taskId}:${delta.hashCode}';
+        if (!watch.recentFingerprints.add(sig)) continue;
+        if (watch.recentFingerprints.length > 300) {
+          watch.recentFingerprints.remove(watch.recentFingerprints.first);
         }
-      } finally {
-        await raf.close();
+        _broadcastTaskUpdate(
+          watch.taskId,
+          'running',
+          streamingDelta: delta,
+        );
       }
+    } catch (e, st) {
+      _logger.warning('event=session.file_read_error taskId=${watch.taskId}', e, st);
+    } finally {
+      await raf.close();
     }
   }
 

@@ -12,6 +12,7 @@ import 'package:mobilepi_shared/mobilepi_shared.dart';
 /// MobilePi 中枢服务器
 class HubServer {
   final int port;
+  final String host;
   final String tenantKey;
   HttpServer? _server;
   final Logger _logger = Logger('HubServer');
@@ -24,7 +25,7 @@ class HubServer {
   int _peerSeq = 0;
   int _messageSeq = 0;
 
-  HubServer({required this.port, required String tenantKey})
+  HubServer({required this.port, required String tenantKey, this.host = '0.0.0.0'})
     : tenantKey = _normalizeTenantKey(tenantKey) {
     if (this.tenantKey.isEmpty) {
       throw ArgumentError.value(tenantKey, 'tenantKey', 'must not be empty');
@@ -38,7 +39,12 @@ class HubServer {
     if (bound == null) {
       throw StateError('Hub server is not started');
     }
-    return 'ws://127.0.0.1:$bound/ws';
+    // Return host-specific ws URL or fallback to localhost/127.0.0.1
+    final displayHost = (host == '0.0.0.0' || host == '::') ? '127.0.0.1' : host;
+    final urlHost = displayHost.contains(':') && !displayHost.startsWith('[')
+        ? '[$displayHost]'
+        : displayHost;
+    return 'ws://$urlHost:$bound/ws';
   }
 
   Future<void> start() async {
@@ -46,7 +52,7 @@ class HubServer {
         .addMiddleware(logRequests())
         .addHandler(_router);
 
-    _server = await shelf_io.serve(handler, InternetAddress.anyIPv4, port);
+    _server = await shelf_io.serve(handler, host, port);
     _logger.info(
       'event=hub.started ${logFields({'address': _server!.address.host, 'port': _server!.port, 'wsUrl': wsUrl})}',
     );

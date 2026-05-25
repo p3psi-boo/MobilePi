@@ -1338,13 +1338,14 @@ class NodeDaemon {
           streamingDelta = event.streamingText;
         }
 
-        // 工具执行开始：按 toolCallId 去重，避免 update/end 重复插入
+        // 记录最近执行的工具名，供 tool_execution_end 组装 <tool_result> 用。
+        // PiRunner 的 tool_execution_start 已经通过 streamingText 发送了
+        // [工具: name]，daemon 这里不再重复插入。
         if (event.toolName != null &&
             event.toolCallId != null &&
             event.toolCallId != lastToolCallId) {
           lastToolCallId = event.toolCallId!;
           lastToolName = event.toolName!;
-          streamingDelta = '\n[工具: $lastToolName]\n';
         }
 
         // 工具执行结束：追加结果

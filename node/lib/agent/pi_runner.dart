@@ -24,6 +24,9 @@ class PiRunner implements AgentRunner {
   PiRpcClient? _client;
   StreamSubscription<Map<String, dynamic>>? _eventSub;
   bool _running = false;
+  /// Tracks tool-call names already emitted as `[工具: name]` in the current turn
+  /// to avoid duplicates between `toolcall_start` and `tool_execution_start`.
+  final Set<String> _emittedToolCalls = <String>{};
 
   @override
   bool get isRunning => _running;
@@ -204,6 +207,7 @@ class PiRunner implements AgentRunner {
     switch (type) {
       case 'agent_start':
       case 'turn_start':
+        _emittedToolCalls.clear();
         _eventController.add(AgentEvent(state: AgentRunState.running));
         break;
       case 'agent_end':
@@ -241,9 +245,9 @@ class PiRunner implements AgentRunner {
             final partial = delta['partial'] as Map?;
             final toolCall = partial?['toolCall'] as Map?;
             final name = toolCall?['name']?.toString();
-            // Suppress partial toolcall without a name — the reliable name
-            // arrives via `tool_execution_start` which is emitted next.
-            if (name != null && name.isNotEmpty) {
+            // Suppress partial toolcall when the name is missing or still a
+            // placeholder — the reliable name arrives via `tool_execution_start`.
+            if (name != null && name.isNotEmpty && name != 'unknown' && _emittedToolCalls.add(name)) {
               _eventController.add(AgentEvent(streamingText: '\n[工具: $name]\n'));
             }
             break;
@@ -251,7 +255,7 @@ class PiRunner implements AgentRunner {
         break;
       case 'tool_execution_start':
         final toolName = event['toolName']?.toString();
-        if (toolName != null && toolName.isNotEmpty) {
+        if (toolName != null && toolName.isNotEmpty && _emittedToolCalls.add(toolName)) {
           _eventController.add(AgentEvent(streamingText: '\n[工具: $toolName]\n'));
         }
         _eventController.add(
@@ -312,6 +316,7 @@ class PiRunner implements AgentRunner {
   }
 
   Future<void> _cleanup() async {
+    _emittedToolCalls.clear();
     await _eventSub?.cancel();
     _eventSub = null;
     await _client?.stop();

@@ -621,11 +621,13 @@ class NodeProvider extends ChangeNotifier {
     if (taskId.isEmpty) return;
 
     final existing = _tasks[taskId];
-    final nextStreamingText =
-        streamingText ??
-        (streamingDelta == null
-            ? null
-            : '${existing?.streamingText ?? ''}$streamingDelta');
+    String? nextStreamingText = streamingText;
+    if (nextStreamingText == null && streamingDelta != null) {
+      final existingText = existing?.streamingText ?? '';
+      if (!_isDuplicateDelta(existingText, streamingDelta)) {
+        nextStreamingText = '$existingText$streamingDelta';
+      }
+    }
 
     if (existing != null) {
       _tasks[taskId] = existing.copyWith(
@@ -1073,6 +1075,15 @@ class NodeProvider extends ChangeNotifier {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '');
+  }
+
+  /// Deduplicate streaming deltas that arrive from both the runner event
+  /// stream and the session-file tail watcher.
+  static bool _isDuplicateDelta(String existing, String delta) {
+    if (delta.length <= 3) return false;
+    if (existing.endsWith(delta)) return true;
+    if (delta.length > 10 && existing.contains(delta)) return true;
+    return false;
   }
 
   String _projectPathFromNode(NodeState? node) {

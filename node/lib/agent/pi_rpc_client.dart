@@ -11,6 +11,9 @@ class PiRpcClient {
     this.args = const <String>['--mode', 'rpc', '--no-session'],
     this.workingDirectory,
     Map<String, String>? environment,
+    this.sandboxMode,
+    this.cpuLimit,
+    this.memLimit,
   }) : environment = environment == null
            ? null
            : Map<String, String>.unmodifiable(environment);
@@ -19,6 +22,9 @@ class PiRpcClient {
   final List<String> args;
   final String? workingDirectory;
   final Map<String, String>? environment;
+  final String? sandboxMode;
+  final String? cpuLimit;
+  final String? memLimit;
 
   final Logger _logger = Logger('PiRpcClient');
   final StreamController<Map<String, dynamic>> _events =
@@ -39,16 +45,56 @@ class PiRpcClient {
   Future<void> start() async {
     if (_process != null) return;
 
+    var exec = executable;
+    var execArgs = List<String>.from(args);
+
+    final mode = (sandboxMode ?? Platform.environment['MOBILE_PI_SANDBOX_MODE'])?.trim().toLowerCase() ?? 'none';
+    final cpu = (cpuLimit ?? Platform.environment['MOBILE_PI_CPU_LIMIT'])?.trim() ?? '50%';
+    final mem = (memLimit ?? Platform.environment['MOBILE_PI_MEM_LIMIT'])?.trim() ?? '2G';
+
+    if (mode == 'systemd') {
+      if (Platform.isLinux) {
+        _logger.info('event=pi_rpc.sandbox_enabled mode=systemd cpu=$cpu mem=$mem');
+        execArgs = [
+          '--user',
+          '--scope',
+          '-p',
+          'CPUQuota=$cpu',
+          '-p',
+          'MemoryMax=$mem',
+          exec,
+          ...execArgs
+        ];
+        exec = 'systemd-run';
+      } else {
+        _logger.warning('event=pi_rpc.sandbox_failed reason=systemd_unsupported_on_platform platform=${Platform.operatingSystem}');
+      }
+    } else if (mode == 'macos') {
+      if (Platform.isMacOS) {
+        _logger.info('event=pi_rpc.sandbox_enabled mode=macos');
+        // A standard macos sandbox profile that restricts system dir writes
+        const profile = '(version 1)\n'
+            '(allow default)\n'
+            '(deny file-write* (subpath "/System"))\n'
+            '(deny file-write* (subpath "/usr"))\n'
+            '(deny file-write* (subpath "/Library"))';
+        execArgs = ['-p', profile, exec, ...execArgs];
+        exec = 'sandbox-exec';
+      } else {
+        _logger.warning('event=pi_rpc.sandbox_failed reason=macos_sandbox_unsupported_on_platform platform=${Platform.operatingSystem}');
+      }
+    }
+
     final process = await Process.start(
-      executable,
-      args,
+      exec,
+      execArgs,
       workingDirectory: workingDirectory,
       environment: environment,
     );
     _process = process;
     _exitCode = process.exitCode;
     _logger.info(
-      'event=pi_rpc.start ${logFields({'executable': executable, 'args': args.join(' '), if (workingDirectory != null) 'cwd': workingDirectory, 'pid': process.pid})}',
+      'event=pi_rpc.start ${logFields({'executable': exec, 'args': execArgs.join(' '), if (workingDirectory != null) 'cwd': workingDirectory, 'pid': process.pid})}',
     );
 
     _stderrSub = process.stderr.transform(utf8.decoder).listen((chunk) {

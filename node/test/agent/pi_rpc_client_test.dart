@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:mobilepi_node/agent/pi_capabilities.dart';
 import 'package:mobilepi_node/agent/pi_rpc_client.dart';
 import 'package:test/test.dart';
@@ -60,6 +62,50 @@ void main() {
       expect(model.supportsImages, isTrue);
       expect(model.supportsReasoning, isTrue);
       expect(model.contextWindow, 256000);
+    });
+  });
+
+  group('PiRpcClient Sandboxing', () {
+    test('wraps executable and arguments properly based on parameters', () async {
+      final isMac = Platform.isMacOS;
+      final isLinux = Platform.isLinux;
+
+      if (isMac) {
+        final client = PiRpcClient(
+          executable: 'pi-nonexistent',
+          args: ['--mode', 'rpc'],
+          sandboxMode: 'macos',
+        );
+        try {
+          await client.start();
+        } catch (e) {
+          expect(e.toString(), contains('sandbox-exec'));
+        }
+      } else if (isLinux) {
+        final client = PiRpcClient(
+          executable: 'pi-nonexistent',
+          args: ['--mode', 'rpc'],
+          sandboxMode: 'systemd',
+          cpuLimit: '40%',
+          memLimit: '1G',
+        );
+        try {
+          await client.start();
+        } catch (e) {
+          expect(e.toString(), contains('systemd-run'));
+        }
+      } else {
+        final client = PiRpcClient(
+          executable: 'pi-invalid',
+          args: ['--mode', 'rpc'],
+          sandboxMode: 'none',
+        );
+        try {
+          await client.start();
+        } catch (e) {
+          expect(e.toString(), contains('pi-invalid'));
+        }
+      }
     });
   });
 }

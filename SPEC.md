@@ -78,6 +78,12 @@
 * 提供独立的 Launcher 进程，通过对比版本号，主动从 Hub 的 HTTP 接口下载对应架构的新版二进制文件。
 * 自动执行文件替换、权限赋予 (chmod +x) 及平滑重启，支持失败回滚。
 
+* **安全沙箱与资源配额 (Sandboxing & Quotas)：**
+  * 支持通过环境变量开启对 Agent 子进程的系统级隔离和配额控制：
+    * `MOBILE_PI_SANDBOX_MODE`：设置隔离模式，可为 `systemd`（Linux 下通过 `systemd-run` 限制 CPU 和内存）、`macos`（macOS 下通过 `sandbox-exec` 阻止写系统目录 `/System`、`/usr` 和 `/Library`）或 `none`（默认）。
+    * `MOBILE_PI_CPU_LIMIT`：子进程 CPU 占比上限（例如 `50%`，默认为 `50%`）。
+    * `MOBILE_PI_MEM_LIMIT`：子进程内存上限（例如 `2G`，默认为 `2G`）。
+
 
 
 ### 3.3 Hub 端 (路由与分发层)

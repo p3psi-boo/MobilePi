@@ -49,6 +49,9 @@ abstract final class ProtocolPayloadKeys {
   /// Current Pi session messages returned by Pi RPC get_messages.
   static const piMessages = 'piMessages';
 
+  /// Optional usage payload attached to a Pi assistant message.
+  static const usage = 'usage';
+
   /// Recent Pi sessions derived from Pi's session manager JSONL files.
   static const piSessions = 'piSessions';
 

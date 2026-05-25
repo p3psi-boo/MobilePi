@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
@@ -72,7 +74,6 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
         children: [
           _TaskStatusBar(taskId: widget.taskId),
           Expanded(child: _OutputView(taskId: widget.taskId)),
-          _TaskActionPalette(taskId: widget.taskId),
           _TaskInputBarWrapper(
             taskId: widget.taskId,
             controller: _inputController,
@@ -154,69 +155,123 @@ class _TaskStatusBar extends StatelessWidget {
   final String taskId;
   const _TaskStatusBar({required this.taskId});
 
-  static String _statusLabel(String status) => switch (status) {
-    'running' => '运行中',
-    'waitingDecision' => '等待决策',
-    'completed' => '已完成',
-    'error' => '出错',
-    _ => '',
-  };
+  static String _formatTokens(int count) {
+    if (count < 1000) return count.toString();
+    if (count < 10000) return '${(count / 1000).toStringAsFixed(1)}k';
+    if (count < 1000000) return '${(count / 1000).round()}k';
+    if (count < 10000000) return '${(count / 1000000).toStringAsFixed(1)}M';
+    return '${(count / 1000000).round()}M';
+  }
+
+  static int? _intVal(Object? v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v?.toString() ?? '');
+  }
+
+  static double? _doubleVal(Object? v) {
+    if (v is double) return v;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v?.toString() ?? '');
+  }
+
+  static Map<String, dynamic>? _mapVal(Object? v) {
+    if (v is Map) return Map<String, dynamic>.from(v);
+    return null;
+  }
+
+  static ({int input, int output, int cacheRead, double percent, int contextWindow}) _buildStats(TaskState task, NodeState? node) {
+    var totalInput = 0;
+    var totalOutput = 0;
+    var totalCacheRead = 0;
+
+    for (final msg in task.messages) {
+      if (msg.role != 'assistant') continue;
+      final usage = msg.usage;
+      if (usage == null) continue;
+      totalInput += _intVal(usage['input']) ?? _intVal(usage['input_tokens']) ?? 0;
+      totalOutput += _intVal(usage['output']) ?? _intVal(usage['output_tokens']) ?? 0;
+      totalCacheRead += _intVal(usage['cacheRead']) ?? _intVal(usage['cache_read_input_tokens']) ?? 0;
+    }
+
+    final piState = node?.piState;
+    final contextUsage = _mapVal(piState?['contextUsage']) ?? _mapVal(piState?['context']);
+    final percent = _doubleVal(contextUsage?['percent']) ?? _doubleVal(piState?['contextPercent']) ?? 0;
+
+    final modelId = task.model ?? node?.piDefaultModel;
+    final model = node?.piModels.where((m) => m.id == modelId).firstOrNull;
+    final contextWindow =
+        _intVal(contextUsage?['contextWindow']) ??
+        _intVal(piState?['contextWindow']) ??
+        model?.contextWindow ??
+        0;
+
+    return (
+      input: totalInput,
+      output: totalOutput,
+      cacheRead: totalCacheRead,
+      percent: percent,
+      contextWindow: contextWindow,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Selector<NodeProvider, (String, int?, String)>(
+    return Selector<NodeProvider, (TaskState?, NodeState?)>(
       selector: (ctx, p) {
         final t = p.getTask(taskId);
-        return (t?.status ?? '', t?.progressPercent, t?.agentType ?? '');
+        NodeState? node;
+        if (t != null) {
+          for (final n in p.nodes) {
+            if (n.nodeId == t.nodeId) {
+              node = n;
+              break;
+            }
+          }
+        }
+        return (t, node);
       },
       builder: (ctx, data, _) {
-        final (status, progressPercent, agentType) = data;
-        if (status.isEmpty) return const SizedBox.shrink();
+        final (task, node) = data;
+        if (task == null) return const SizedBox.shrink();
 
         final theme = Theme.of(context);
-        final isRunning = status == 'running';
-        final statusColor = switch (status) {
-          'running' => Colors.green,
-          'waitingDecision' => Colors.orange,
-          'error' => Colors.red,
-          'history' => theme.colorScheme.primary,
-          'completed' => Colors.blueGrey,
-          _ => Colors.grey,
-        };
+        final stats = _buildStats(task, node);
+        final textStyle = theme.textTheme.bodySmall?.copyWith(
+          fontFeatures: const [FontFeature.tabularFigures()],
+          color: theme.colorScheme.onSurfaceVariant,
+        );
 
         return Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          color: statusColor.withValues(alpha: 0.1),
+          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
           child: Row(
             children: [
-              _StatusDot(online: isRunning),
-              const SizedBox(width: 8),
-              Text(
-                _statusLabel(status),
-                style: theme.textTheme.titleSmall?.copyWith(
-                  color: statusColor,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const Spacer(),
-              Chip(
-                avatar: Icon(
-                  Icons.memory,
-                  size: 16,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-                label: Text(agentType, style: theme.textTheme.bodySmall),
-              ),
-              if (progressPercent != null) ...[
-                const SizedBox(width: 8),
-                Text(
-                  '$progressPercent%',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    fontWeight: FontWeight.bold,
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      Text('↑', style: textStyle),
+                      _FlipStatNumber(value: _formatTokens(stats.input), style: textStyle),
+                      const SizedBox(width: 8),
+                      Text('↓', style: textStyle),
+                      _FlipStatNumber(value: _formatTokens(stats.output), style: textStyle),
+                      if (stats.cacheRead > 0) ...[
+                        const SizedBox(width: 8),
+                        Text('R${_formatTokens(stats.cacheRead)}', style: textStyle),
+                      ],
+                    ],
                   ),
                 ),
-              ],
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '${stats.percent.toStringAsFixed(1)}%/${_formatTokens(stats.contextWindow)}',
+                style: textStyle,
+                textAlign: TextAlign.right,
+              ),
             ],
           ),
         );
@@ -225,22 +280,43 @@ class _TaskStatusBar extends StatelessWidget {
   }
 }
 
-class _TaskActionPalette extends StatelessWidget {
-  final String taskId;
-  const _TaskActionPalette({required this.taskId});
+class _FlipStatNumber extends StatelessWidget {
+  final String value;
+  final TextStyle? style;
+
+  const _FlipStatNumber({required this.value, this.style});
 
   @override
   Widget build(BuildContext context) {
-    return Selector<NodeProvider, (bool, TaskState?)>(
-      selector: (ctx, p) {
-        final t = p.getTask(taskId);
-        return (t?.status == 'running', t);
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 320),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final rotate = Tween<double>(begin: -math.pi / 2, end: 0).animate(animation);
+        return AnimatedBuilder(
+          animation: rotate,
+          child: child,
+          builder: (context, c) {
+            final v = rotate.value;
+            return Transform(
+              alignment: Alignment.center,
+              transform: Matrix4.identity()
+                ..setEntry(3, 2, 0.002)
+                ..rotateX(v),
+              child: Opacity(
+                opacity: animation.value.clamp(0, 1),
+                child: c,
+              ),
+            );
+          },
+        );
       },
-      builder: (ctx, data, _) {
-        final (isRunning, task) = data;
-        if (!isRunning || task == null) return const SizedBox.shrink();
-        return _ActionPalette(task: task);
-      },
+      child: Text(
+        value,
+        key: ValueKey<String>(value),
+        style: style,
+      ),
     );
   }
 }
@@ -1321,80 +1397,6 @@ class _ToolChipState extends State<_ToolChip> {
   }
 }
 
-/// Action Palette — 上下文感知快捷操作
-class _ActionPalette extends StatelessWidget {
-  final TaskState task;
-  const _ActionPalette({required this.task});
-
-  @override
-  Widget build(BuildContext context) {
-    final provider = context.read<NodeProvider>();
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 4,
-        children: [
-          _ActionChip(
-            icon: Icons.stop,
-            label: '停止',
-            color: Colors.red,
-            onTap: () => provider.sendPanic(task.nodeId, taskId: task.id),
-          ),
-          _ActionChip(
-            icon: Icons.replay,
-            label: '换个思路',
-            onTap: () => provider.sendSteer(task.id, '停下来，换个思路重新实现这个功能'),
-          ),
-          _ActionChip(
-            icon: Icons.bug_report,
-            label: '看日志',
-            onTap: () => provider.sendSteer(task.id, '打印最近的错误日志和堆栈'),
-          ),
-          _ActionChip(
-            icon: Icons.undo,
-            label: '回退',
-            onTap: () => provider.sendSteer(task.id, '放弃当前修改，回退到上一个稳定状态'),
-          ),
-          _ActionChip(
-            icon: Icons.science,
-            label: '跑测试',
-            onTap: () => provider.sendFollowUp(task.id, '完成后运行全部测试'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActionChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color? color;
-  final VoidCallback onTap;
-
-  const _ActionChip({
-    required this.icon,
-    required this.label,
-    this.color,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final c = color ?? theme.colorScheme.primary;
-
-    return ActionChip(
-      avatar: Icon(icon, size: 16, color: c),
-      label: Text(label, style: TextStyle(fontSize: 12, color: c)),
-      side: BorderSide(color: c.withValues(alpha: 0.3)),
-      onPressed: onTap,
-    );
-  }
-}
-
 /// 底部输入栏
 class _InputBar extends StatelessWidget {
   final TextEditingController controller;
@@ -1525,14 +1527,6 @@ class _InputBar extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '内容由AI生成',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: cs.onSurfaceVariant.withValues(alpha: 0.35),
             ),
           ),
         ],

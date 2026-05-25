@@ -164,6 +164,9 @@ class PiSessionIndex {
                           isUtc: true,
                         ),
                   model: message['model']?.toString(),
+                  usage: message['usage'] is Map
+                      ? Map<String, dynamic>.from(message['usage'] as Map)
+                      : null,
                 ),
               );
             }
@@ -266,6 +269,9 @@ class PiSessionIndex {
                               isUtc: true,
                             ),
                       model: message['model']?.toString(),
+                      usage: message['usage'] is Map
+                          ? Map<String, dynamic>.from(message['usage'] as Map)
+                          : null,
                     ),
                   );
                 }

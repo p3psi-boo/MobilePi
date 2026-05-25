@@ -57,5 +57,23 @@ void main() {
       expect(instance.isDefault, isTrue);
       expect(instance.isRunning, isTrue);
     });
+
+    test('parses session message usage when present and keeps null when absent', () {
+      final withUsage = PiSessionMessageInfo.fromJson({
+        'role': 'assistant',
+        'text': 'done',
+        'usage': {'input_tokens': 10, 'output_tokens': 20, 'total_tokens': 30},
+      });
+      final withoutUsage = PiSessionMessageInfo.fromJson({
+        'role': 'assistant',
+        'text': 'done',
+      });
+
+      expect(withUsage.usage, isNotNull);
+      expect(withUsage.usage!['input_tokens'], equals(10));
+      expect(withUsage.usage!['output_tokens'], equals(20));
+      expect(withUsage.usage!['total_tokens'], equals(30));
+      expect(withoutUsage.usage, isNull);
+    });
   });
 }

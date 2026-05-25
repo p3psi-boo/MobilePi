@@ -122,7 +122,9 @@ class WebSocketService {
       throw FormatException('无效的 URL: $url');
     }
 
-    var result = '$scheme://${uri.host}';
+    final normalizedHost = uri.host.contains(':') ? '[${uri.host}]' : uri.host;
+
+    var result = '$scheme://$normalizedHost';
     if (uri.hasPort) {
       result += ':${uri.port}';
     }
@@ -198,7 +200,7 @@ class WebSocketService {
         return;
       }
 
-      _logger.fine('event=ws.receive ${summarizeMessage(message)}');
+      _logger.info('event=ws.receive ${summarizeMessage(message)}');
       _messageController.add(message);
     } catch (e, st) {
       _logger.warning('event=ws.message_error', e, st);
@@ -283,6 +285,9 @@ class WebSocketService {
       to: 'hub',
       type: MessageType.hello,
       payload: payload,
+    );
+    _logger.info(
+      'event=ws.hello_send ${logFields({'clientId': _clientId, 'url': _wsUrl, 'tenantKeySet': _tenantKey.isNotEmpty})}',
     );
     _send(message);
   }
@@ -451,6 +456,7 @@ class WebSocketService {
   void sendSessionMessagesRequest(
     String nodeId,
     String sessionPath, {
+    String? taskId,
     int limit = 20,
     int? beforeIndex,
   }) {
@@ -462,6 +468,7 @@ class WebSocketService {
       payload: {
         ProtocolPayloadKeys.commandType: 'messages.list',
         'sessionPath': sessionPath,
+        if (taskId != null && taskId.isNotEmpty) 'taskId': taskId,
         'limit': limit,
         'beforeIndex': ?beforeIndex,
       },

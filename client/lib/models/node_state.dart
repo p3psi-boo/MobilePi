@@ -158,12 +158,14 @@ class PiSessionMessageInfo {
   final String text;
   final DateTime? timestamp;
   final String? model;
+  final Map<String, dynamic>? usage;
 
   const PiSessionMessageInfo({
     required this.role,
     required this.text,
     this.timestamp,
     this.model,
+    this.usage,
   });
 
   factory PiSessionMessageInfo.fromJson(Map<String, dynamic> json) {
@@ -172,6 +174,9 @@ class PiSessionMessageInfo {
       text: json['text']?.toString() ?? '',
       timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? ''),
       model: json['model']?.toString(),
+      usage: json['usage'] is Map
+          ? Map<String, dynamic>.from(json['usage'] as Map)
+          : null,
     );
   }
 

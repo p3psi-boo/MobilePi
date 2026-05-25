@@ -86,102 +86,104 @@ class PiMarkdown extends StatelessWidget {
 
     final fontSize = baseStyle?.fontSize ?? 14;
 
-    return GptMarkdown(
-      text,
-      style: baseStyle,
-      followLinkColor: inverted,
-      highlightBuilder: (context, content, textStyle) {
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-          decoration: BoxDecoration(
-            color: inlineCodeBg,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: Text(
-            content,
-            style: textStyle.copyWith(
-              fontFamily: 'monospace',
-              fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
-              color: inlineCodeColor,
-              fontSize: fontSize * 0.92,
-              height: 1.3,
+    return SelectionArea(
+      child: GptMarkdown(
+        text,
+        style: baseStyle,
+        followLinkColor: inverted,
+        highlightBuilder: (context, content, textStyle) {
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: inlineCodeBg,
+              borderRadius: BorderRadius.circular(4),
             ),
-          ),
-        );
-      },
-      codeBuilder: (context, name, code, closed) {
-        // 去掉末尾多余换行，避免代码块底部出现额外空白行
-        final trimmed = code.replaceAll(RegExp(r'\n+$'), '');
-        return Container(
-          width: double.infinity,
-          margin: const EdgeInsets.symmetric(vertical: 6),
-          decoration: BoxDecoration(
-            color: codeBlockBg,
-            borderRadius: BorderRadius.circular(6),
-            border: Border(
-              left: BorderSide(color: codeBlockBorder, width: 2),
+            child: Text(
+              content,
+              style: textStyle.copyWith(
+                fontFamily: 'monospace',
+                fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                color: inlineCodeColor,
+                fontSize: fontSize * 0.92,
+                height: 1.3,
+              ),
             ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (name.isNotEmpty || !inverted)
-                Padding(
-                  padding: const EdgeInsets.only(
-                    left: 12,
-                    right: 8,
-                    top: 6,
-                    bottom: 2,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          name.isNotEmpty ? name : 'code',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: codeBlockLangColor,
-                            fontFamily: 'monospace',
-                            fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
-                            fontSize: 10,
-                            letterSpacing: 0.4,
-                          ),
-                        ),
-                      ),
-                      if (!inverted)
-                        InkWell(
-                          borderRadius: BorderRadius.circular(4),
-                          onTap: () => Clipboard.setData(
-                            ClipboardData(text: trimmed),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(4),
-                            child: Icon(
-                              Icons.copy,
-                              size: 12,
+          );
+        },
+        codeBuilder: (context, name, code, closed) {
+          // 去掉末尾多余换行，避免代码块底部出现额外空白行
+          final trimmed = code.replaceAll(RegExp(r'\n+$'), '');
+          return Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(
+              color: codeBlockBg,
+              borderRadius: BorderRadius.circular(6),
+              border: Border(
+                left: BorderSide(color: codeBlockBorder, width: 2),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (name.isNotEmpty || !inverted)
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: 12,
+                      right: 8,
+                      top: 6,
+                      bottom: 2,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            name.isNotEmpty ? name : 'code',
+                            style: theme.textTheme.labelSmall?.copyWith(
                               color: codeBlockLangColor,
+                              fontFamily: 'monospace',
+                              fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                              fontSize: 10,
+                              letterSpacing: 0.4,
                             ),
                           ),
                         ),
-                    ],
+                        if (!inverted)
+                          InkWell(
+                            borderRadius: BorderRadius.circular(4),
+                            onTap: () => Clipboard.setData(
+                              ClipboardData(text: trimmed),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(4),
+                              child: Icon(
+                                Icons.copy,
+                                size: 12,
+                                color: codeBlockLangColor,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                  child: SelectableText(
+                    trimmed,
+                    style: (baseStyle ?? const TextStyle()).copyWith(
+                      fontFamily: 'monospace',
+                      fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                      fontSize: fontSize * 0.92,
+                      color: codeBlockTextColor,
+                      height: 1.45,
+                    ),
                   ),
                 ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-                child: SelectableText(
-                  trimmed,
-                  style: (baseStyle ?? const TextStyle()).copyWith(
-                    fontFamily: 'monospace',
-                    fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
-                    fontSize: fontSize * 0.92,
-                    color: codeBlockTextColor,
-                    height: 1.45,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:logging/logging.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -205,6 +206,7 @@ class NodeProvider extends ChangeNotifier {
   }
 
   bool get isConnecting => _connecting;
+  bool get isConnected => _ws.isConnected;
   bool get hasOnlineNodes => _nodes.values.any((n) => n.online);
   String get hubUrl => _hubUrl;
   String get tenantKey => _tenantKey;
@@ -471,6 +473,9 @@ class NodeProvider extends ChangeNotifier {
             .map((summary) => Map<String, dynamic>.from(summary))
             .toList() ??
         const <Map<String, dynamic>>[];
+    Logger('NodeProvider').info(
+      'event=node_summaries.received ${logFields({'count': nodeSummaries.length, 'from': message.from, 'responseTo': responseTo})}',
+    );
     for (final summary in nodeSummaries) {
       final nodeId =
           summary[ProtocolPayloadKeys.nodeId]?.toString() ??
@@ -485,6 +490,9 @@ class NodeProvider extends ChangeNotifier {
       final nodeId =
           summary[ProtocolPayloadKeys.nodeId]?.toString() ??
           _normalizeNodeId(message.from);
+      Logger('NodeProvider').info(
+        'event=node_summary.received ${logFields({'nodeId': nodeId, 'from': message.from})}',
+      );
       _applyNodeSummary(summary, from: nodeId);
     }
 
@@ -814,6 +822,7 @@ class NodeProvider extends ChangeNotifier {
     _ws.sendSessionMessagesRequest(
       nodeId,
       sessionPath,
+      taskId: taskId,
       limit: limit,
       beforeIndex: beforeIndex,
     );

@@ -283,6 +283,84 @@ void main() {
     await tempDir.delete(recursive: true);
   });
 
+  test('external session append emits live delta events', () async {
+    final tempDir = await Directory.systemTemp.createTemp(
+      'mobilepi_daemon_external_sync_test_',
+    );
+    final dbPath = p.join(tempDir.path, 'node.db');
+    final sessionPath = p.join(tempDir.path, 'session.jsonl');
+    await File(sessionPath).writeAsString('');
+    final port = 23500 + DateTime.now().millisecond;
+    final runner = FakeAgentRunner();
+    final daemon = NodeDaemon(
+      port: port,
+      dbPath: dbPath,
+      runnerFactory: (_) => runner,
+    );
+
+    unawaited(daemon.start());
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+    final events = <MobilePiMessage>[];
+    final sub = ws
+        .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+        .listen(events.add);
+    final taskId = const Uuid().v4();
+
+    ws.add(
+      jsonEncode(
+        MobilePiMessage(
+          messageId: const Uuid().v4(),
+          from: 'client',
+          to: 'node:test',
+          type: MessageType.command,
+          payload: {
+            ProtocolPayloadKeys.commandType: 'task.follow_up',
+            ProtocolPayloadKeys.requestId: const Uuid().v4(),
+            'taskId': taskId,
+            ProtocolPayloadKeys.sessionPath: sessionPath,
+            'message': 'resume and watch',
+          },
+        ).toJson(),
+      ),
+    );
+
+    await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.event &&
+          _eventPayload(m)['taskId'] == taskId &&
+          (_eventPayload(m)['streamingDelta'] as String? ?? '').contains(
+            'prompt:resume and watch',
+          ),
+      timeout: const Duration(seconds: 5),
+      label: 'resume prompt event',
+    );
+
+    await File(sessionPath).writeAsString(
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"external live delta"}]}}\n',
+      mode: FileMode.append,
+    );
+
+    await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.event &&
+          _eventPayload(m)['taskId'] == taskId &&
+          (_eventPayload(m)['streamingDelta'] as String? ?? '').contains(
+            'external live delta',
+          ),
+      timeout: const Duration(seconds: 8),
+      label: 'external session delta event',
+    );
+
+    await sub.cancel();
+    await ws.close();
+    await daemon.stop();
+    await tempDir.delete(recursive: true);
+  });
+
   test(
     'protocol command events are persisted and replayed by cursor',
     () async {

@@ -22,6 +22,20 @@ typedef AgentRunnerFactory = AgentRunner? Function(String agentType);
 /// 默认主动连接 Hub，由 Hub 负责 Client ↔ Daemon 路由。
 /// 也可启动本地直连 WebSocket Server，使用同一套协议方便集成测试。
 /// 处理心跳 (ping/pong) 与统一交互协议。
+class _SessionWatchState {
+  _SessionWatchState({
+    required this.taskId,
+    required this.sessionPath,
+    this.offset = 0,
+  });
+
+  final String taskId;
+  final String sessionPath;
+  int offset;
+  String partial = '';
+  final Set<String> recentFingerprints = <String>{};
+}
+
 class NodeDaemon {
   late final String nodeId;
   late final String hostname;
@@ -46,6 +60,8 @@ class NodeDaemon {
   final Map<String, String> _activeTaskIdsByInstance = {};
   final Map<String, String> _taskInstanceIds = {};
   final Map<String, String> _taskModels = {};
+  final Map<String, _SessionWatchState> _sessionWatchesByTask = {};
+  Timer? _sessionWatchTimer;
   PiCapabilities _piCapabilities = PiCapabilities.empty;
   DateTime? _piCapabilitiesLoadedAt;
   Future<void>? _piCapabilitiesRefresh;
@@ -204,6 +220,9 @@ class NodeDaemon {
     _stopping = true;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _sessionWatchTimer?.cancel();
+    _sessionWatchTimer = null;
+    _sessionWatchesByTask.clear();
     for (final subscription in _runnerSubs.values) {
       await subscription.cancel();
     }
@@ -897,6 +916,7 @@ class NodeDaemon {
 
     try {
       await runner.resumeSession(taskId, sessionPath, model: model);
+      _startSessionWatch(taskId: taskId, sessionPath: sessionPath);
       final resumedFields = <String, Object?>{
         'taskId': shortId(taskId),
         'instanceId': instanceId,
@@ -924,6 +944,113 @@ class NodeDaemon {
     }
   }
 
+  void _startSessionWatch({
+    required String taskId,
+    required String sessionPath,
+  }) {
+    final file = File(sessionPath);
+    final existing = _sessionWatchesByTask[taskId];
+    if (existing != null && existing.sessionPath == sessionPath) return;
+    _sessionWatchesByTask[taskId] = _SessionWatchState(
+      taskId: taskId,
+      sessionPath: sessionPath,
+      offset: file.existsSync() ? file.lengthSync() : 0,
+    );
+    _sessionWatchTimer ??= Timer.periodic(
+      const Duration(milliseconds: 1200),
+      (_) => _pollSessionWatches(),
+    );
+  }
+
+  Future<void> _pollSessionWatches() async {
+    if (_stopping || _sessionWatchesByTask.isEmpty) return;
+    for (final watch in _sessionWatchesByTask.values) {
+      final file = File(watch.sessionPath);
+      if (!file.existsSync()) continue;
+      final len = file.lengthSync();
+      if (len < watch.offset) {
+        watch.offset = 0;
+        watch.partial = '';
+      }
+      if (len == watch.offset) continue;
+      final raf = await file.open();
+      try {
+        await raf.setPosition(watch.offset);
+        final bytes = await raf.read(len - watch.offset);
+        watch.offset = len;
+        final chunk = watch.partial + utf8.decode(bytes, allowMalformed: true);
+        final lines = chunk.split('\n');
+        watch.partial = lines.removeLast();
+        for (final line in lines) {
+          final delta = _extractDeltaFromSessionLine(line);
+          if (delta == null || delta.isEmpty) continue;
+          final sig = '${watch.taskId}:${delta.hashCode}';
+          if (!watch.recentFingerprints.add(sig)) continue;
+          if (watch.recentFingerprints.length > 300) {
+            watch.recentFingerprints.remove(watch.recentFingerprints.first);
+          }
+          _broadcastTaskUpdate(
+            watch.taskId,
+            'running',
+            streamingDelta: delta,
+          );
+        }
+      } finally {
+        await raf.close();
+      }
+    }
+  }
+
+  String? _extractDeltaFromSessionLine(String line) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final obj = jsonDecode(trimmed);
+      if (obj is! Map) return null;
+      if (obj['type']?.toString() != 'message') return null;
+      final msg = obj['message'];
+      if (msg is! Map) return null;
+      if (msg['role']?.toString() != 'assistant') return null;
+      final content = msg['content'];
+      if (content is! List) return null;
+      final parts = <String>[];
+      for (final item in content) {
+        if (item is Map && item['type']?.toString() == 'text') {
+          final text = item['text']?.toString();
+          if (text != null && text.isNotEmpty) parts.add(text);
+        }
+      }
+      if (parts.isEmpty) return null;
+      return parts.join('\n');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _broadcastTaskUpdate(
+    String taskId,
+    String status, {
+    String? streamingDelta,
+  }) {
+    if (_hubChannel != null) {
+      _sendTaskUpdate(
+        _hubChannel!,
+        taskId,
+        status,
+        streamingDelta: streamingDelta,
+      );
+      return;
+    }
+    for (final channel in _clients.values) {
+      _sendTaskUpdate(
+        channel,
+        taskId,
+        status,
+        streamingDelta: streamingDelta,
+      );
+    }
+  }
+
   Future<void> _handleSessionMessagesRequest(
     String clientId,
     WebSocketChannel channel,
@@ -931,6 +1058,7 @@ class NodeDaemon {
   ) async {
     final payload = message.payload;
     final sessionPath = payload['sessionPath'] as String?;
+    final taskId = payload['taskId']?.toString();
     final limit = payload['limit'] as int? ?? 20;
     final beforeIndex = payload['beforeIndex'] as int?;
 
@@ -942,8 +1070,22 @@ class NodeDaemon {
     }
 
     _logger.info(
-      'event=messages.list ${logFields({'sessionPath': sessionPath, 'limit': limit, 'beforeIndex': beforeIndex})}',
+      'event=messages.list ${logFields({'sessionPath': sessionPath, 'taskId': shortId(taskId), 'limit': limit, 'beforeIndex': beforeIndex})}',
     );
+
+    if (taskId != null && taskId.isNotEmpty) {
+      _taskInstanceIds.putIfAbsent(taskId, () => _defaultPiInstanceId);
+      _db!.upsertTask(
+        taskId: taskId,
+        streamId: _taskStreamId(taskId),
+        agentType: 'pi',
+        title: 'Pi session ${taskId.length <= 8 ? taskId : taskId.substring(0, 8)}',
+        status: 'running',
+        sessionPath: sessionPath,
+        model: _taskModels[taskId],
+      );
+      _startSessionWatch(taskId: taskId, sessionPath: sessionPath);
+    }
     final res = await PiSessionIndex.getSessionMessages(
       sessionPath: sessionPath,
       limit: limit,
@@ -1493,7 +1635,7 @@ class NodeDaemon {
   }
 
   static String normalizeHubUrl(String url) {
-    var trimmed = url.trim();
+    final trimmed = url.trim();
     if (trimmed.isEmpty) {
       throw FormatException('Hub URL 不能为空');
     }
@@ -1502,8 +1644,8 @@ class NodeDaemon {
       r'^([a-zA-Z]+)://',
       caseSensitive: false,
     ).firstMatch(trimmed);
-    String scheme;
-    String remainder;
+    late final String scheme;
+    late final String remainder;
     if (schemeMatch != null) {
       final parsedScheme = schemeMatch.group(1)!.toLowerCase();
       if (parsedScheme == 'https' || parsedScheme == 'wss') {
@@ -1524,7 +1666,10 @@ class NodeDaemon {
       throw FormatException('无效的 Hub URL: $url');
     }
 
-    var result = '$scheme://${uri.host}';
+    final isIpv6Host = uri.host.contains(':');
+    final normalizedHost = isIpv6Host ? '[${uri.host}]' : uri.host;
+
+    var result = '$scheme://$normalizedHost';
     if (uri.hasPort) {
       result += ':${uri.port}';
     }

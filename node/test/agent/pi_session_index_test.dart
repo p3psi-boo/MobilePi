@@ -103,4 +103,84 @@ void main() {
       expect(messages.last['text'], contains('Message content 5'));
     });
   });
+
+  group('PiSessionIndex message usage passthrough', () {
+    late Directory tempDir;
+    late String sessionPath;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('pi_session_usage_test');
+      sessionPath = p.join(tempDir.path, 'session_usage.jsonl');
+    });
+
+    tearDown(() async {
+      await tempDir.delete(recursive: true);
+    });
+
+    test('preserves usage on assistant message', () async {
+      final file = File(sessionPath);
+      final sink = file.openWrite();
+      sink.writeln(jsonEncode({
+        'type': 'session',
+        'id': 'usage-session-1',
+        'cwd': '/test/path',
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+      }));
+      sink.writeln(jsonEncode({
+        'type': 'message',
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+        'message': {
+          'role': 'assistant',
+          'content': 'assistant content',
+          'usage': {'input_tokens': 12, 'output_tokens': 34, 'total_tokens': 46},
+        }
+      }));
+      await sink.close();
+
+      final result = await PiSessionIndex.getSessionMessages(
+        sessionPath: sessionPath,
+        limit: 20,
+      );
+
+      expect(result, isNotNull);
+      final messages = result!['messages'] as List<dynamic>;
+      expect(messages, hasLength(1));
+      final usage = messages.first['usage'] as Map<String, dynamic>?;
+      expect(usage, isNotNull);
+      expect(usage!['input_tokens'], equals(12));
+      expect(usage['output_tokens'], equals(34));
+      expect(usage['total_tokens'], equals(46));
+    });
+
+    test('missing usage does not crash and remains null', () async {
+      final file = File(sessionPath);
+      final sink = file.openWrite();
+      sink.writeln(jsonEncode({
+        'type': 'session',
+        'id': 'usage-session-2',
+        'cwd': '/test/path',
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+      }));
+      sink.writeln(jsonEncode({
+        'type': 'message',
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+        'message': {
+          'role': 'assistant',
+          'content': 'assistant content without usage',
+        }
+      }));
+      await sink.close();
+
+      final result = await PiSessionIndex.getSessionMessages(
+        sessionPath: sessionPath,
+        limit: 20,
+      );
+
+      expect(result, isNotNull);
+      final messages = result!['messages'] as List<dynamic>;
+      expect(messages, hasLength(1));
+      expect(messages.first.containsKey('usage'), isFalse);
+    });
+  });
 }
+

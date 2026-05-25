@@ -211,12 +211,14 @@ class PiSessionMessageInfo {
   final String text;
   final DateTime? timestamp;
   final String? model;
+  final Map<String, dynamic>? usage;
 
   const PiSessionMessageInfo({
     required this.role,
     required this.text,
     this.timestamp,
     this.model,
+    this.usage,
   });
 
   Map<String, dynamic> toJson() => {
@@ -224,6 +226,7 @@ class PiSessionMessageInfo {
     'text': text,
     if (timestamp != null) 'timestamp': timestamp!.toUtc().toIso8601String(),
     if (model != null) 'model': model,
+    if (usage != null) 'usage': usage,
   };
 }
 

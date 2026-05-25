@@ -76,7 +76,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('已保存，正在重连…'),
+          content: Text('已保存，正在连接…'),
           duration: Duration(seconds: 2),
         ),
       );
@@ -103,6 +103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cs = theme.colorScheme;
     final currentUrl = context.select<NodeProvider, String>((p) => p.hubUrl);
     final currentKey = context.select<NodeProvider, String>((p) => p.tenantKey);
+    final isConnecting = context.select<NodeProvider, bool>((p) => p.isConnecting);
+    final isConnected = context.select<NodeProvider, bool>((p) => p.isConnected);
+    final hasTenantKey = context.select<NodeProvider, bool>((p) => p.hasTenantKey);
     final defaultUrl = WebSocketService.defaultHubUrl();
 
     return Scaffold(
@@ -201,12 +204,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       )
                     : const Icon(Icons.check_rounded, size: 18),
-                label: const Text('保存并重连'),
+                label: const Text('保存并连接'),
               ),
             ],
           ),
           const SizedBox(height: 24),
-          _InfoRow(label: '当前已连接', value: currentUrl),
+          _ConnectionStatusRow(
+            isConnecting: isConnecting,
+            isConnected: isConnected,
+            hasTenantKey: hasTenantKey,
+          ),
+          _InfoRow(label: '当前已配置 URL', value: currentUrl),
           _InfoRow(label: '当前 Key', value: _maskKey(currentKey)),
           _InfoRow(label: '默认 URL', value: defaultUrl),
         ],
@@ -236,6 +244,69 @@ class _SectionLabel extends StatelessWidget {
         fontWeight: FontWeight.w700,
         letterSpacing: 0.4,
         color: cs.onSurface.withValues(alpha: 0.65),
+      ),
+    );
+  }
+}
+
+class _ConnectionStatusRow extends StatelessWidget {
+  final bool isConnecting;
+  final bool isConnected;
+  final bool hasTenantKey;
+
+  const _ConnectionStatusRow({
+    required this.isConnecting,
+    required this.isConnected,
+    required this.hasTenantKey,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    IconData icon;
+    String text;
+    Color color;
+
+    if (!hasTenantKey) {
+      icon = Icons.key_off_rounded;
+      text = '未连接（未设置 Key）';
+      color = cs.error;
+    } else if (isConnecting) {
+      icon = Icons.sync_rounded;
+      text = '连接中';
+      color = cs.secondary;
+    } else if (isConnected) {
+      icon = Icons.check_circle_rounded;
+      text = '已连接';
+      color = cs.primary;
+    } else {
+      icon = Icons.error_outline_rounded;
+      text = '未连接';
+      color = cs.error;
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 8),
+          Text(
+            '连接状态：$text',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
     );
   }

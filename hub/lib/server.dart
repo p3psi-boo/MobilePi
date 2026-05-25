@@ -21,7 +21,6 @@ class HubServer {
   final Map<String, Map<String, dynamic>> _nodeSummaries = {};
   final Map<WebSocketChannel, String> _daemonIdsByChannel = {};
   final Map<WebSocketChannel, String> _clientIdsByChannel = {};
-  String? _activeClientId;
   int _peerSeq = 0;
   int _messageSeq = 0;
 
@@ -67,7 +66,6 @@ class HubServer {
     _nodeSummaries.clear();
     _daemonIdsByChannel.clear();
     _clientIdsByChannel.clear();
-    _activeClientId = null;
     await _server?.close(force: true);
     _logger.info('event=hub.stopped');
   }
@@ -160,18 +158,12 @@ class HubServer {
     if (previousId != null) {
       _clients.remove(previousId);
     }
-    final activeClientId = _activeClientId;
-    if (activeClientId != null && activeClientId != clientId) {
-      final oldClient = _clients.remove(activeClientId);
-      if (oldClient != null && !identical(oldClient, channel)) {
-        unawaited(oldClient.sink.close());
-      }
-    }
+
+    final replaced = _clients.containsKey(clientId);
     _clientIdsByChannel[channel] = clientId;
     _clients[clientId] = channel;
-    _activeClientId = clientId;
     _logger.info(
-      'event=client.registered ${logFields({'clientId': clientId, 'replacedClientId': activeClientId == null || activeClientId == clientId ? null : activeClientId})}',
+      'event=client.registered ${logFields({'clientId': clientId, 'replacedSameClientId': replaced, 'clientCount': _clients.length})}',
     );
   }
 
@@ -253,6 +245,13 @@ class HubServer {
       return;
     }
 
+    if (target == 'client') {
+      for (final client in _clients.values) {
+        _sendMessage(client, message);
+      }
+      return;
+    }
+
     final normalizedClientTarget = _normalizeClientTarget(target);
     final client = normalizedClientTarget == null
         ? null
@@ -293,11 +292,8 @@ class HubServer {
     final clientId = _clientIdsByChannel.remove(channel);
     if (clientId != null) {
       _clients.remove(clientId);
-      if (_activeClientId == clientId) {
-        _activeClientId = null;
-      }
       _logger.info(
-        'event=client.disconnected ${logField('clientId', clientId)}',
+        'event=client.disconnected ${logFields({'clientId': clientId, 'clientCount': _clients.length})}',
       );
     }
 
@@ -355,8 +351,9 @@ class HubServer {
   }
 
   String? _normalizeClientTarget(String target) {
-    if (target != 'client') return null;
-    return _activeClientId;
+    final trimmed = target.trim();
+    if (trimmed.isEmpty || trimmed == 'client') return null;
+    return trimmed;
   }
 
   bool _isAuthorized(MobilePiMessage message) {

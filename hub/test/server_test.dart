@@ -291,5 +291,107 @@ void main() {
       expect(clientMessage.from, 'node:node-1');
       expect(clientMessage.to, 'client');
     });
+
+    test('daemon events to client are broadcast to all connected clients', () async {
+      final daemon = await WebSocket.connect(server.wsUrl);
+      final clientA = await WebSocket.connect(server.wsUrl);
+      final clientB = await WebSocket.connect(server.wsUrl);
+      final daemonMessages = StreamIterator<dynamic>(daemon);
+      final clientAMessages = StreamIterator<dynamic>(clientA);
+      final clientBMessages = StreamIterator<dynamic>(clientB);
+
+      addTearDown(() async {
+        await daemonMessages.cancel();
+        await clientAMessages.cancel();
+        await clientBMessages.cancel();
+        await daemon.close();
+        await clientA.close();
+        await clientB.close();
+      });
+
+      daemon.add(
+        jsonEncode(
+          MobilePiMessage(
+            messageId: 'node-hello',
+            from: 'node:node-1',
+            to: 'hub',
+            type: MessageType.hello,
+            payload: {
+              ProtocolPayloadKeys.tenantKey: 'tenant-a',
+              ProtocolPayloadKeys.nodeId: 'node-1',
+              ProtocolPayloadKeys.hostname: 'macbook',
+              ProtocolPayloadKeys.agents: ['pi'],
+            },
+          ).toJson(),
+        ),
+      );
+
+      clientA.add(
+        jsonEncode(
+          MobilePiMessage(
+            messageId: 'client-a-hello',
+            from: 'client',
+            to: 'hub',
+            type: MessageType.hello,
+            payload: const {
+              ProtocolPayloadKeys.tenantKey: 'tenant-a',
+              'clientId': 'phone-a',
+            },
+          ).toJson(),
+        ),
+      );
+      expect(await clientAMessages.moveNext(), isTrue);
+
+      clientB.add(
+        jsonEncode(
+          MobilePiMessage(
+            messageId: 'client-b-hello',
+            from: 'client',
+            to: 'hub',
+            type: MessageType.hello,
+            payload: const {
+              ProtocolPayloadKeys.tenantKey: 'tenant-a',
+              'clientId': 'phone-b',
+            },
+          ).toJson(),
+        ),
+      );
+      expect(await clientBMessages.moveNext(), isTrue);
+
+      daemon.add(
+        jsonEncode(
+          MobilePiMessage(
+            messageId: 'event',
+            from: 'node:node-1',
+            to: 'client',
+            type: MessageType.event,
+            payload: const {
+              ProtocolPayloadKeys.streamId: 'task:task-1',
+              ProtocolPayloadKeys.seq: 1,
+              ProtocolPayloadKeys.eventType: 'task.output.delta',
+              ProtocolPayloadKeys.eventPayload: {
+                'taskId': 'task-1',
+                'text': 'ok',
+              },
+            },
+          ).toJson(),
+        ),
+      );
+
+      expect(await clientAMessages.moveNext(), isTrue);
+      final aEvent = MobilePiMessage.fromJson(
+        jsonDecode(clientAMessages.current as String) as Map<String, dynamic>,
+      );
+      expect(aEvent.type, MessageType.event);
+
+      expect(await clientBMessages.moveNext(), isTrue);
+      final bEvent = MobilePiMessage.fromJson(
+        jsonDecode(clientBMessages.current as String) as Map<String, dynamic>,
+      );
+      expect(bEvent.type, MessageType.event);
+
+      // Daemon should not receive its own routed event.
+      expect(await daemonMessages.moveNext().timeout(const Duration(milliseconds: 200), onTimeout: () => false), isFalse);
+    });
   });
 }

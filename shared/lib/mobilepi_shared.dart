@@ -8,5 +8,6 @@ library;
 /// - 共享工具函数
 
 export 'models/task.dart';
+export 'models/usage_info.dart';
 export 'logging/mobilepi_logging.dart';
 export 'protocol/messages.dart';

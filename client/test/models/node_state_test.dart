@@ -70,9 +70,9 @@ void main() {
       });
 
       expect(withUsage.usage, isNotNull);
-      expect(withUsage.usage!['input_tokens'], equals(10));
-      expect(withUsage.usage!['output_tokens'], equals(20));
-      expect(withUsage.usage!['total_tokens'], equals(30));
+      expect(withUsage.usage!.input, equals(10));
+      expect(withUsage.usage!.output, equals(20));
+      expect(withUsage.usage!.totalTokens, equals(30));
       expect(withoutUsage.usage, isNull);
     });
   });

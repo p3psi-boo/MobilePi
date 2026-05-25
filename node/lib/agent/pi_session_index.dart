@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:mobilepi_shared/mobilepi_shared.dart';
 import 'package:path/path.dart' as p;
 
 import 'pi_capabilities.dart';
@@ -165,7 +166,9 @@ class PiSessionIndex {
                         ),
                   model: message['model']?.toString(),
                   usage: message['usage'] is Map
-                      ? Map<String, dynamic>.from(message['usage'] as Map)
+                      ? UsageInfo.fromJson(
+                          Map<String, dynamic>.from(message['usage'] as Map),
+                        )
                       : null,
                 ),
               );
@@ -270,7 +273,9 @@ class PiSessionIndex {
                             ),
                       model: message['model']?.toString(),
                       usage: message['usage'] is Map
-                          ? Map<String, dynamic>.from(message['usage'] as Map)
+                          ? UsageInfo.fromJson(
+                              Map<String, dynamic>.from(message['usage'] as Map),
+                            )
                           : null,
                     ),
                   );

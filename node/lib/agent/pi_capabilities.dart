@@ -1,3 +1,5 @@
+import 'package:mobilepi_shared/mobilepi_shared.dart';
+
 class PiCapabilities {
   final String? defaultModel;
   final List<PiModelInfo> models;
@@ -211,7 +213,7 @@ class PiSessionMessageInfo {
   final String text;
   final DateTime? timestamp;
   final String? model;
-  final Map<String, dynamic>? usage;
+  final UsageInfo? usage;
 
   const PiSessionMessageInfo({
     required this.role,
@@ -226,7 +228,7 @@ class PiSessionMessageInfo {
     'text': text,
     if (timestamp != null) 'timestamp': timestamp!.toUtc().toIso8601String(),
     if (model != null) 'model': model,
-    if (usage != null) 'usage': usage,
+    if (usage != null) 'usage': usage!.toJson(),
   };
 }
 

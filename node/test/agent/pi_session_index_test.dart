@@ -147,9 +147,9 @@ void main() {
       expect(messages, hasLength(1));
       final usage = messages.first['usage'] as Map<String, dynamic>?;
       expect(usage, isNotNull);
-      expect(usage!['input_tokens'], equals(12));
-      expect(usage['output_tokens'], equals(34));
-      expect(usage['total_tokens'], equals(46));
+      expect(usage!['input'], equals(12));
+      expect(usage['output'], equals(34));
+      expect(usage['totalTokens'], equals(46));
     });
 
     test('missing usage does not crash and remains null', () async {

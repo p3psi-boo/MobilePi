@@ -1,3 +1,5 @@
+import 'package:mobilepi_shared/mobilepi_shared.dart';
+
 /// Node 在线状态模型
 class PiModelInfo {
   final String id;
@@ -158,7 +160,7 @@ class PiSessionMessageInfo {
   final String text;
   final DateTime? timestamp;
   final String? model;
-  final Map<String, dynamic>? usage;
+  final UsageInfo? usage;
 
   const PiSessionMessageInfo({
     required this.role,
@@ -175,7 +177,7 @@ class PiSessionMessageInfo {
       timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? ''),
       model: json['model']?.toString(),
       usage: json['usage'] is Map
-          ? Map<String, dynamic>.from(json['usage'] as Map)
+          ? UsageInfo.fromJson(Map<String, dynamic>.from(json['usage'] as Map))
           : null,
     );
   }

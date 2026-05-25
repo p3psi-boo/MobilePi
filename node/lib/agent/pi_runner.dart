@@ -24,9 +24,6 @@ class PiRunner implements AgentRunner {
   PiRpcClient? _client;
   StreamSubscription<Map<String, dynamic>>? _eventSub;
   bool _running = false;
-  /// Tracks tool-call names already emitted as `[工具: name]` in the current turn
-  /// to avoid duplicates between `toolcall_start` and `tool_execution_start`.
-  final Set<String> _emittedToolCalls = <String>{};
 
   @override
   bool get isRunning => _running;
@@ -207,7 +204,6 @@ class PiRunner implements AgentRunner {
     switch (type) {
       case 'agent_start':
       case 'turn_start':
-        _emittedToolCalls.clear();
         _eventController.add(AgentEvent(state: AgentRunState.running));
         break;
       case 'agent_end':
@@ -228,7 +224,7 @@ class PiRunner implements AgentRunner {
             break;
           case 'thinking_start':
             _eventController.add(
-              const AgentEvent(streamingText: '<thinking>\n'),
+              const AgentEvent(thinkingBoundary: ThinkingBoundary.start),
             );
             break;
           case 'thinking_delta':
@@ -238,37 +234,27 @@ class PiRunner implements AgentRunner {
             break;
           case 'thinking_end':
             _eventController.add(
-              const AgentEvent(streamingText: '\n</thinking>\n'),
+              const AgentEvent(thinkingBoundary: ThinkingBoundary.end),
             );
             break;
           case 'toolcall_start':
-            final partial = delta['partial'] as Map?;
-            final toolCall = partial?['toolCall'] as Map?;
-            final name = toolCall?['name']?.toString();
-            // Suppress partial toolcall when the name is missing or still a
-            // placeholder — the reliable name arrives via `tool_execution_start`.
-            if (name != null && name.isNotEmpty && name != 'unknown' && _emittedToolCalls.add(name)) {
-              _eventController.add(AgentEvent(streamingText: '\n[工具: $name]\n'));
-            }
+            // Do NOT emit text – the reliable name arrives via
+            // `tool_execution_start` which carries the structured fields.
             break;
         }
         break;
       case 'tool_execution_start':
         final toolName = event['toolName']?.toString();
-        if (toolName != null && toolName.isNotEmpty && _emittedToolCalls.add(toolName)) {
-          _eventController.add(AgentEvent(streamingText: '\n[工具: $toolName]\n'));
+        if (toolName != null && toolName.isNotEmpty) {
+          _eventController.add(
+            AgentEvent(
+              toolCallId: event['toolCallId']?.toString(),
+              toolName: toolName,
+            ),
+          );
         }
-        _eventController.add(
-          AgentEvent(
-            toolCallId: event['toolCallId']?.toString(),
-            toolName: toolName,
-          ),
-        );
         break;
       case 'tool_execution_update':
-        // 实时 partialResult 是累积输出，暂不流式发送，
-        // 避免 textBuffer 中堆积重复内容。
-        // 最终输出由 tool_execution_end 提供。
         break;
       case 'tool_execution_end':
         _eventController.add(
@@ -288,19 +274,26 @@ class PiRunner implements AgentRunner {
         }
         break;
       case 'queue_update':
-        // Queue depth is internal state; do not stream to the user surface.
         break;
       case 'compaction_start':
-        _eventController.add(const AgentEvent(streamingText: '[压缩上下文中]'));
+        _eventController.add(
+          const AgentEvent(statusLabel: '压缩上下文中'),
+        );
         break;
       case 'compaction_end':
-        _eventController.add(const AgentEvent(streamingText: '[上下文压缩完成]'));
+        _eventController.add(
+          const AgentEvent(statusLabel: '上下文压缩完成'),
+        );
         break;
       case 'auto_retry_start':
-        _eventController.add(const AgentEvent(streamingText: '[自动重试开始]'));
+        _eventController.add(
+          const AgentEvent(statusLabel: '自动重试开始'),
+        );
         break;
       case 'auto_retry_end':
-        _eventController.add(const AgentEvent(streamingText: '[自动重试结束]'));
+        _eventController.add(
+          const AgentEvent(statusLabel: '自动重试结束'),
+        );
         break;
       case 'extension_error':
         _eventController.add(
@@ -316,7 +309,6 @@ class PiRunner implements AgentRunner {
   }
 
   Future<void> _cleanup() async {
-    _emittedToolCalls.clear();
     await _eventSub?.cancel();
     _eventSub = null;
     await _client?.stop();

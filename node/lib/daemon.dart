@@ -1306,15 +1306,16 @@ class NodeDaemon {
     String instanceId,
     WebSocketChannel channel,
   ) {
-    var lastToolName = '';
-    var lastToolCallId = '';
-
     _runnerSubs[instanceId] = runner.eventStream.listen(
       (event) {
         String? status;
         String? streamingText;
         String? streamingDelta;
         int? progress;
+        Map<String, dynamic>? toolCall;
+        Map<String, dynamic>? toolResult;
+        String? thinking;
+        String? statusLabel;
 
         switch (event.state) {
           case AgentRunState.starting:
@@ -1334,27 +1335,39 @@ class NodeDaemon {
             break;
         }
 
+        // Pure text delta — no structural markers injected.
         if (event.streamingText != null) {
           streamingDelta = event.streamingText;
         }
 
-        // 记录最近执行的工具名，供 tool_execution_end 组装 <tool_result> 用。
-        // PiRunner 的 tool_execution_start 已经通过 streamingText 发送了
-        // [工具: name]，daemon 这里不再重复插入。
-        if (event.toolName != null &&
-            event.toolCallId != null &&
-            event.toolCallId != lastToolCallId) {
-          lastToolCallId = event.toolCallId!;
-          lastToolName = event.toolName!;
+        // Structured tool-call event.
+        if (event.toolName != null && event.toolName!.isNotEmpty) {
+          toolCall = {
+            'name': event.toolName,
+            if (event.toolCallId != null) 'id': event.toolCallId,
+          };
         }
 
-        // 工具执行结束：追加结果
+        // Structured tool-result event.
         if (event.toolResult != null && event.toolResult!.isNotEmpty) {
-          final status = event.toolResultIsError == true ? '失败' : '成功';
-          streamingDelta =
-              '\n<tool_result name="$lastToolName" status="$status">\n'
-              '${event.toolResult}\n'
-              '</tool_result>\n';
+          toolResult = {
+            'name': event.toolName ?? '',
+            'isError': event.toolResultIsError == true,
+            'text': event.toolResult,
+            if (event.toolCallId != null) 'id': event.toolCallId,
+          };
+        }
+
+        // Thinking boundary.
+        if (event.thinkingBoundary != null) {
+          thinking = event.thinkingBoundary == ThinkingBoundary.start
+              ? 'start'
+              : 'end';
+        }
+
+        // Status label (compaction, retry, etc.).
+        if (event.statusLabel != null) {
+          statusLabel = event.statusLabel;
         }
 
         if (event.progress != null) {
@@ -1370,6 +1383,10 @@ class NodeDaemon {
           progressPercent: progress,
           linesAdded: event.linesAdded,
           linesRemoved: event.linesRemoved,
+          toolCall: toolCall,
+          toolResult: toolResult,
+          thinking: thinking,
+          statusLabel: statusLabel,
         );
       },
       onDone: () {
@@ -1399,6 +1416,10 @@ class NodeDaemon {
     int? progressPercent,
     int? linesAdded,
     int? linesRemoved,
+    Map<String, dynamic>? toolCall,
+    Map<String, dynamic>? toolResult,
+    String? thinking,
+    String? statusLabel,
   }) {
     final payload = _buildTaskUpdatePayload(
       taskId,
@@ -1408,6 +1429,10 @@ class NodeDaemon {
       progressPercent: progressPercent,
       linesAdded: linesAdded,
       linesRemoved: linesRemoved,
+      toolCall: toolCall,
+      toolResult: toolResult,
+      thinking: thinking,
+      statusLabel: statusLabel,
     );
     if (taskId.isNotEmpty) {
       _db!.updateTaskStatus(taskId, status);
@@ -1417,6 +1442,10 @@ class NodeDaemon {
       streamingText: streamingText,
       streamingDelta: streamingDelta,
       progressPercent: progressPercent,
+      toolCall: toolCall,
+      toolResult: toolResult,
+      thinking: thinking,
+      statusLabel: statusLabel,
     );
     final event = taskId.isEmpty
         ? null
@@ -1452,6 +1481,10 @@ class NodeDaemon {
     int? progressPercent,
     int? linesAdded,
     int? linesRemoved,
+    Map<String, dynamic>? toolCall,
+    Map<String, dynamic>? toolResult,
+    String? thinking,
+    String? statusLabel,
   }) {
     final payload = <String, dynamic>{'taskId': taskId, 'status': status};
     final instanceId = _taskInstanceIds[taskId] ?? _defaultPiInstanceId;
@@ -1465,6 +1498,10 @@ class NodeDaemon {
     if (progressPercent != null) payload['progressPercent'] = progressPercent;
     if (linesAdded != null) payload['linesAdded'] = linesAdded;
     if (linesRemoved != null) payload['linesRemoved'] = linesRemoved;
+    if (toolCall != null) payload[ProtocolPayloadKeys.toolCall] = toolCall;
+    if (toolResult != null) payload[ProtocolPayloadKeys.toolResult] = toolResult;
+    if (thinking != null) payload[ProtocolPayloadKeys.thinking] = thinking;
+    if (statusLabel != null) payload[ProtocolPayloadKeys.statusLabel] = statusLabel;
     return payload;
   }
 
@@ -1484,6 +1521,10 @@ class NodeDaemon {
     String? streamingText,
     String? streamingDelta,
     int? progressPercent,
+    Map<String, dynamic>? toolCall,
+    Map<String, dynamic>? toolResult,
+    String? thinking,
+    String? statusLabel,
   }) {
     if (status == 'completed') return 'task.completed';
     if (status == 'idle') return 'task.aborted';
@@ -1491,6 +1532,10 @@ class NodeDaemon {
     if (streamingDelta != null) return 'task.output.delta';
     if (streamingText != null) return 'task.output.snapshot';
     if (progressPercent != null) return 'task.progress';
+    if (toolCall != null) return 'task.output.delta';
+    if (toolResult != null) return 'task.output.delta';
+    if (thinking != null) return 'task.output.delta';
+    if (statusLabel != null) return 'task.output.delta';
     return 'task.status';
   }
 

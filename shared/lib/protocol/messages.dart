@@ -117,6 +117,18 @@ abstract final class ProtocolPayloadKeys {
   /// Whether a resume response should include the current Node summary.
   static const includeNodeSummary = 'includeNodeSummary';
 
+  /// Structured tool-call event (name only, no text injected into stream).
+  static const toolCall = 'toolCall';
+
+  /// Structured tool-result event (name, isError, text).
+  static const toolResult = 'toolResult';
+
+  /// Thinking boundary: `"start"` or `"end"`.
+  static const thinking = 'thinking';
+
+  /// Status label emitted by the agent (compaction, retry, etc.).
+  static const statusLabel = 'statusLabel';
+
   /// Current Node summary payload.
   static const nodeSummary = 'nodeSummary';
 

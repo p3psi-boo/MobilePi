@@ -15,6 +15,29 @@ const String _kTenantKeyPrefKey = 'mobilepi.tenantKey';
 const String _kCursorPrefKey = 'mobilepi.cursors';
 
 /// 任务运行时状态
+/// A structured tool call recorded during streaming.
+class StreamingToolEvent {
+  final String name;
+  final String? id;
+  final bool isResult;
+  final bool isError;
+  final String? resultText;
+
+  const StreamingToolEvent.call({
+    required this.name,
+    this.id,
+  }) : isResult = false,
+       isError = false,
+       resultText = null;
+
+  const StreamingToolEvent.result({
+    required this.name,
+    this.id,
+    required this.isError,
+    required this.resultText,
+  }) : isResult = true;
+}
+
 class TaskState {
   final String id;
   final String nodeId;
@@ -36,6 +59,17 @@ class TaskState {
   final int? totalCount;
   final DateTime createdAt;
 
+  /// Structured tool events accumulated during streaming.
+  /// Filled by `toolCall`/`toolResult` protocol payloads — never from text.
+  final List<StreamingToolEvent> toolEvents;
+
+  /// Whether the model is currently thinking (structured boundary).
+  /// `true` after `thinking: "start"`, `false` after `thinking: "end"`.
+  final bool isThinking;
+
+  /// Status labels (compaction, retry, etc.) shown transiently.
+  final String? statusLabel;
+
   TaskState({
     required this.id,
     required this.nodeId,
@@ -55,6 +89,9 @@ class TaskState {
     this.linesRemoved,
     this.nextBeforeIndex,
     this.totalCount,
+    this.toolEvents = const [],
+    this.isThinking = false,
+    this.statusLabel,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -73,6 +110,9 @@ class TaskState {
     int? linesRemoved,
     int? nextBeforeIndex,
     int? totalCount,
+    List<StreamingToolEvent>? toolEvents,
+    bool? isThinking,
+    String? statusLabel,
   }) {
     return TaskState(
       id: id,
@@ -93,6 +133,9 @@ class TaskState {
       linesRemoved: linesRemoved ?? this.linesRemoved,
       nextBeforeIndex: nextBeforeIndex ?? this.nextBeforeIndex,
       totalCount: totalCount ?? this.totalCount,
+      toolEvents: toolEvents ?? this.toolEvents,
+      isThinking: isThinking ?? this.isThinking,
+      statusLabel: statusLabel ?? this.statusLabel,
       createdAt: createdAt,
     );
   }
@@ -618,15 +661,48 @@ class NodeProvider extends ChangeNotifier {
             name: _projectName(projectPath),
           );
 
+    // --- Structured fields ---
+    final toolCallRaw = payload[ProtocolPayloadKeys.toolCall];
+    final toolResultRaw = payload[ProtocolPayloadKeys.toolResult];
+    final thinkingRaw = payload[ProtocolPayloadKeys.thinking]?.toString();
+    final statusLabel = payload[ProtocolPayloadKeys.statusLabel]?.toString();
+
     if (taskId.isEmpty) return;
 
     final existing = _tasks[taskId];
+
+    // Build updated tool events list
+    var toolEvents = existing?.toolEvents ?? <StreamingToolEvent>[];
+    if (toolCallRaw is Map) {
+      toolEvents = [
+        ...toolEvents,
+        StreamingToolEvent.call(
+          name: toolCallRaw['name']?.toString() ?? '',
+          id: toolCallRaw['id']?.toString(),
+        ),
+      ];
+    }
+    if (toolResultRaw is Map) {
+      toolEvents = [
+        ...toolEvents,
+        StreamingToolEvent.result(
+          name: toolResultRaw['name']?.toString() ?? '',
+          id: toolResultRaw['id']?.toString(),
+          isError: toolResultRaw['isError'] == true,
+          resultText: toolResultRaw['text']?.toString(),
+        ),
+      ];
+    }
+
+    // Thinking boundary
+    bool? isThinking;
+    if (thinkingRaw == 'start') isThinking = true;
+    if (thinkingRaw == 'end') isThinking = false;
+
+    // Pure text delta
     String? nextStreamingText = streamingText;
     if (nextStreamingText == null && streamingDelta != null) {
-      final existingText = existing?.streamingText ?? '';
-      if (!_isDuplicateDelta(existingText, streamingDelta)) {
-        nextStreamingText = '$existingText$streamingDelta';
-      }
+      nextStreamingText = '${existing?.streamingText ?? ''}$streamingDelta';
     }
 
     if (existing != null) {
@@ -639,6 +715,9 @@ class NodeProvider extends ChangeNotifier {
         progressPercent: progressPercent,
         linesAdded: linesAdded,
         linesRemoved: linesRemoved,
+        toolEvents: toolEvents,
+        isThinking: isThinking,
+        statusLabel: statusLabel,
       );
     } else {
       _tasks[taskId] = TaskState(
@@ -656,6 +735,9 @@ class NodeProvider extends ChangeNotifier {
         progressPercent: progressPercent,
         linesAdded: linesAdded,
         linesRemoved: linesRemoved,
+        toolEvents: toolEvents,
+        isThinking: isThinking ?? false,
+        statusLabel: statusLabel,
       );
     }
 
@@ -1075,15 +1157,6 @@ class NodeProvider extends ChangeNotifier {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '');
-  }
-
-  /// Deduplicate streaming deltas that arrive from both the runner event
-  /// stream and the session-file tail watcher.
-  static bool _isDuplicateDelta(String existing, String delta) {
-    if (delta.length <= 3) return false;
-    if (existing.endsWith(delta)) return true;
-    if (delta.length > 10 && existing.contains(delta)) return true;
-    return false;
   }
 
   String _projectPathFromNode(NodeState? node) {

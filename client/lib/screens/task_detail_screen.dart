@@ -9,6 +9,8 @@ import '../widgets/pi_markdown.dart';
 import '../widgets/task_status_bar.dart';
 
 /// 任务详情页 — 展示完整输出流 + Steering/Follow-up 输入
+const int _maxRenderedStreamingChars = 24000;
+
 class TaskDetailScreen extends StatefulWidget {
   final String taskId;
 
@@ -230,7 +232,6 @@ class _OutputView extends StatefulWidget {
 }
 
 class _OutputViewState extends State<_OutputView> {
-  static const int _maxRenderedStreamingChars = 24000;
 
   final ScrollController _scrollController = ScrollController();
   int _lastMessageCount = 0;
@@ -456,14 +457,26 @@ class _OutputViewState extends State<_OutputView> {
         ),
         SliverPadding(
           padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
-          sliver: Selector<NodeProvider, (String?, bool)>(
+          sliver: Selector<NodeProvider, (String?, bool, List<StreamingToolEvent>, bool, String?)>(
             selector: (ctx, p) {
               final t = p.getTask(widget.taskId);
-              return (t?.streamingText, t?.status == 'running');
+              return (
+                t?.streamingText,
+                t?.status == 'running',
+                t?.toolEvents ?? const [],
+                t?.isThinking ?? false,
+                t?.statusLabel,
+              );
             },
             builder: (context, data, _) {
-              final (streamingText, isRunning) = data;
-              if (streamingText == null || streamingText.isEmpty) {
+              final streamingText = data.$1;
+              final isRunning = data.$2;
+              final toolEvents = data.$3;
+              final isThinking = data.$4;
+              final statusLabel = data.$5;
+              final hasContent = streamingText != null && streamingText.isNotEmpty ||
+                  toolEvents.isNotEmpty || statusLabel != null;
+              if (!hasContent) {
                 if (isRunning && _lastMessageCount == 0) {
                   return const SliverToBoxAdapter(
                     child: Center(
@@ -507,18 +520,30 @@ class _OutputViewState extends State<_OutputView> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (streamingText.length > _maxRenderedStreamingChars)
+                      if (streamingText != null &&
+                          streamingText.length > _maxRenderedStreamingChars)
                         _OutputTruncationNotice(
                           omittedChars:
                               streamingText.length - _maxRenderedStreamingChars,
                         ),
-                      ..._buildMessagePartWidgets(
-                        context,
-                        _MessagePartsParser.parse(
-                          _renderedStreamingText(streamingText),
+                      // Markdown text (pure — no structural tags)
+                      if (streamingText != null && streamingText.isNotEmpty)
+                        ..._buildStreamingTextWidgets(
+                          context,
+                          streamingText,
+                          isThinking: isThinking,
+                          isFinal: !isRunning,
                         ),
-                        isFinal: !isRunning,
-                      ),
+                      // Structured tool events
+                      if (toolEvents.isNotEmpty)
+                        _buildStreamingToolChips(
+                          context,
+                          toolEvents,
+                          isFinal: !isRunning,
+                        ),
+                      // Status label (compaction, retry, etc.)
+                      if (statusLabel != null)
+                        _StatusLabel(label: statusLabel),
                     ],
                   ),
                 ),
@@ -530,9 +555,120 @@ class _OutputViewState extends State<_OutputView> {
     );
   }
 
-  static String _renderedStreamingText(String text) {
-    if (text.length <= _maxRenderedStreamingChars) return text;
-    return text.substring(text.length - _maxRenderedStreamingChars);
+}
+
+/// Streaming text rendered as markdown.
+/// No structural tags — pure text.
+List<Widget> _buildStreamingTextWidgets(
+  BuildContext context,
+  String streamingText, {
+  bool isThinking = false,
+  bool isFinal = true,
+}) {
+  final theme = Theme.of(context);
+  final text = streamingText.length <= _maxRenderedStreamingChars
+      ? streamingText
+      : streamingText.substring(streamingText.length - _maxRenderedStreamingChars);
+  if (text.trim().isEmpty) return [];
+  final widget = RepaintBoundary(
+    child: PiMarkdown(
+      text,
+      style: theme.textTheme.bodyMedium?.copyWith(
+        height: 1.6,
+        color: cs.onSurface.withValues(alpha: 0.85),
+      ),
+    ),
+  );
+  if (isThinking) {
+    return [RepaintBoundary(child: _ThinkingBlock(text: text))];
+  }
+  return [widget];
+}
+
+/// Render structured tool events as chips.
+Widget _buildStreamingToolChips(
+  BuildContext context,
+  List<StreamingToolEvent> toolEvents, {
+  bool isFinal = true,
+}) {
+  final theme = Theme.of(context);
+  final cs = theme.colorScheme;
+  final chips = <Widget>[];
+
+  for (int i = 0; i < toolEvents.length; i++) {
+    final ev = toolEvents[i];
+    if (ev.isResult) {
+      chips.add(
+        _ToolChip(
+          key: ValueKey('tr_$i'),
+          toolName: ev.name,
+          status: ev.isError ? '失败' : '成功',
+          content: ev.resultText,
+        ),
+      );
+    } else {
+      // Check if there's a matching result later
+      bool hasResult = false;
+      for (int j = i + 1; j < toolEvents.length; j++) {
+        if (toolEvents[j].isResult && toolEvents[j].name == ev.name) {
+          hasResult = true;
+          break;
+        }
+      }
+      chips.add(
+        _ToolChip(
+          key: ValueKey('tc_$i'),
+          toolName: ev.name,
+          status: null,
+          isLoading: !isFinal && !hasResult,
+        ),
+      );
+    }
+  }
+
+  if (chips.isEmpty) return const SizedBox.shrink();
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: chips,
+    ),
+  );
+}
+
+/// Transient status label (compaction, retry, etc.).
+class _StatusLabel extends StatelessWidget {
+  final String label;
+  const _StatusLabel({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+          SizedBox(width: 8),
+          Text(
+            label,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

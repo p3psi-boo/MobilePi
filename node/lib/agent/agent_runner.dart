@@ -5,6 +5,9 @@ enum AgentRunState { starting, running, completed, aborted, error }
 ///
 /// 由各 Runner 实现将 Agent CLI 的输出翻译为此统一格式，
 /// 再由 NodeDaemon 包装为 MobilePiMessage(event) 发送给 Client。
+/// Structured thinking boundary (not mixed into streaming text).
+enum ThinkingBoundary { start, end }
+
 class AgentEvent {
   final AgentRunState state;
   final String? streamingText;
@@ -16,6 +19,15 @@ class AgentEvent {
   final int? linesAdded;
   final int? linesRemoved;
 
+  /// Non-null when a thinking boundary is crossed.
+  /// `start` = model begins thinking; `end` = thinking done.
+  /// Text deltas during thinking still go through [streamingText].
+  final ThinkingBoundary? thinkingBoundary;
+
+  /// Non-null when the agent emits a status label (compaction, retry, etc.)
+  /// that should be shown to the user but is *not* part of the markdown text.
+  final String? statusLabel;
+
   const AgentEvent({
     this.state = AgentRunState.running,
     this.streamingText,
@@ -26,6 +38,8 @@ class AgentEvent {
     this.progress,
     this.linesAdded,
     this.linesRemoved,
+    this.thinkingBoundary,
+    this.statusLabel,
   });
 }
 

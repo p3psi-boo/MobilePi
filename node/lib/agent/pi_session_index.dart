@@ -329,7 +329,8 @@ class PiSessionIndex {
     Map<String, dynamic> message,
     List<Map<String, dynamic>> blocks,
   ) {
-    final toolName = message['toolName']?.toString() ?? 'unknown';
+    final toolName = message['toolName']?.toString();
+    if (toolName == null || toolName.isEmpty) return '';
     final isError = message['isError'] == true;
     final text = blocks
         .where((b) => b['type'] == 'text')
@@ -354,7 +355,8 @@ class PiSessionIndex {
           parts.add('<thinking>\n$thinking\n</thinking>');
         }
       } else if (type == 'toolCall') {
-        final name = block['name']?.toString() ?? 'unknown';
+        final name = block['name']?.toString();
+        if (name == null || name.isEmpty) continue;
         parts.add('[工具: $name]');
       }
     }

@@ -240,16 +240,24 @@ class PiRunner implements AgentRunner {
           case 'toolcall_start':
             final partial = delta['partial'] as Map?;
             final toolCall = partial?['toolCall'] as Map?;
-            final name = toolCall?['name']?.toString() ?? 'unknown';
-            _eventController.add(AgentEvent(streamingText: '\n[工具: $name]\n'));
+            final name = toolCall?['name']?.toString();
+            // Suppress partial toolcall without a name — the reliable name
+            // arrives via `tool_execution_start` which is emitted next.
+            if (name != null && name.isNotEmpty) {
+              _eventController.add(AgentEvent(streamingText: '\n[工具: $name]\n'));
+            }
             break;
         }
         break;
       case 'tool_execution_start':
+        final toolName = event['toolName']?.toString();
+        if (toolName != null && toolName.isNotEmpty) {
+          _eventController.add(AgentEvent(streamingText: '\n[工具: $toolName]\n'));
+        }
         _eventController.add(
           AgentEvent(
             toolCallId: event['toolCallId']?.toString(),
-            toolName: event['toolName']?.toString(),
+            toolName: toolName,
           ),
         );
         break;
@@ -276,10 +284,7 @@ class PiRunner implements AgentRunner {
         }
         break;
       case 'queue_update':
-        final pending = event['pendingMessageCount'] ?? event['pending'];
-        if (pending != null) {
-          _eventController.add(AgentEvent(streamingText: '[队列: $pending]'));
-        }
+        // Queue depth is internal state; do not stream to the user surface.
         break;
       case 'compaction_start':
         _eventController.add(const AgentEvent(streamingText: '[压缩上下文中]'));

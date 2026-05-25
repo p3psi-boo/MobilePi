@@ -382,7 +382,7 @@ class NodeProvider extends ChangeNotifier {
         payload[ProtocolPayloadKeys.nodeId] as String? ??
         _normalizeNodeId(from);
     final hostname =
-        payload[ProtocolPayloadKeys.hostname] as String? ?? 'Unknown';
+        payload[ProtocolPayloadKeys.hostname] as String? ?? nodeId;
     final platform = payload[ProtocolPayloadKeys.platform] as String? ?? '';
     final agents =
         (payload[ProtocolPayloadKeys.agents] as List<dynamic>?)

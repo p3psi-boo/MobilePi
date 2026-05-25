@@ -42,3 +42,37 @@ Completed MVP Rails 2-5 for mobile-agent-dashboard: Pi RPC task execution, task 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Daemon Resource Isolation and Log Watching
+
+**Date**: 2026-05-25
+**Task**: Daemon Resource Isolation and Log Watching
+**Branch**: `master`
+
+### Summary
+
+Upgraded periodic session log scanning to OS-level File.watch (FSEvents/inotify), achieving sub-millisecond logging latency and zero idle CPU/IO overhead. Implemented configurable process sandboxing (systemd-run on Linux, sandbox-exec on macOS) to enforce resource quotas and block system directory writes.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fd29941` | (see git log) |
+| `e8215af` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

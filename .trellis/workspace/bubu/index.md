@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
-- **Last Active**: 2026-05-15
+- **Total Sessions**: 2
+- **Last Active**: 2026-05-25
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~44 | Active |
+| `journal-1.md` | ~78 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 2 | 2026-05-25 | Daemon Resource Isolation and Log Watching | `fd29941`, `e8215af` | `master` |
 | 1 | 2026-05-15 | Rails 2-5 complete: task execution, interaction, delta sync | `e739183`, `b7ea727`, `ccdbd92`, `465a65c`, `91edbe0` | `master` |
 <!-- @@@/auto:session-history -->
 

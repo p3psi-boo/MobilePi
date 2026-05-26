@@ -422,33 +422,38 @@ class _OutputViewState extends State<_OutputView> {
                 return const SliverToBoxAdapter(child: SizedBox.shrink());
               }
               return SliverList(
-                delegate: SliverChildBuilderDelegate((context, index) {
-                  final msg = messages[index];
-                  final isUser = msg.role == 'user';
-                  bool showHeader = false;
-                  if (!isUser) {
-                    if (index == 0) {
-                      showHeader = true;
-                    } else {
-                      final prevMsg = messages[index - 1];
-                      if (prevMsg.role == 'user') {
-                        showHeader = true;
-                      } else {
-                        final currentModel = msg.model ?? fallbackModel;
-                        final prevModel = prevMsg.model ?? fallbackModel;
-                        if (currentModel != prevModel) {
-                          showHeader = true;
-                        }
-                      }
-                    }
+                delegate: SliverChildBuilderDelegate((context, idx) {
+                  final msg = messages[idx];
+
+                  // Group consecutive non-user messages into a single "turn".
+                  // If this message is non-user and the previous one was also
+                  // non-user, it was already rendered as part of the group
+                  // started earlier — skip.
+                  if (idx > 0 && msg.role != 'user' && messages[idx - 1].role != 'user') {
+                    return const SizedBox.shrink();
                   }
-                  return _MessageItem(
-                    key: ValueKey('msg_$index'),
-                    message: msg,
-                    isUser: isUser,
-                    isFinal: true,
+
+                  final isUser = msg.role == 'user';
+                  if (isUser) {
+                    return _MessageItem(
+                      key: ValueKey('msg_$idx'),
+                      message: msg,
+                      isUser: true,
+                      isFinal: true,
+                    );
+                  }
+
+                  // Collect consecutive non-user messages into a group
+                  int end = idx;
+                  while (end < messages.length && messages[end].role != 'user') {
+                    end++;
+                  }
+                  final group = messages.sublist(idx, end);
+
+                  return _AgentTurnWidget(
+                    key: ValueKey('turn_$idx'),
+                    messages: group,
                     modelName: msg.model ?? fallbackModel,
-                    showHeader: showHeader,
                   );
                 }, childCount: messages.length),
               );
@@ -1080,6 +1085,102 @@ List<Widget> _buildMessagePartWidgets(
   }
 
   return widgets;
+}
+
+/// A grouped "turn" of consecutive non-user messages (assistant + toolResult + ...).
+/// Shows one header (avatar + model name) for the whole group, Telegram-style.
+class _AgentTurnWidget extends StatelessWidget {
+  final List<PiSessionMessageInfo> messages;
+  final String? modelName;
+
+  const _AgentTurnWidget({super.key, required this.messages, this.modelName});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = modelName != null && modelName!.isNotEmpty ? modelName! : 'Pi Agent';
+
+    return Container(
+      margin: const EdgeInsets.only(top: 16, right: 16, bottom: 16, left: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Single header for the whole turn
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 12,
+                backgroundColor: theme.colorScheme.primaryContainer,
+                child: Icon(
+                  Icons.auto_awesome,
+                  size: 14,
+                  color: theme.colorScheme.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Render each message in the turn — no individual headers
+          for (int i = 0; i < messages.length; i++)
+            _buildTurnMessage(context, messages[i], i),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTurnMessage(BuildContext context, PiSessionMessageInfo message, int index) {
+    final isToolResult = message.role == 'toolResult';
+    final hasStructuredParts = message.parts.isNotEmpty;
+
+    if (isToolResult) {
+      if (hasStructuredParts) {
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: _buildHistoryPartWidgets(context, message.parts, isFinal: true),
+          ),
+        );
+      }
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: _buildMessagePartWidgets(
+            context,
+            _MessagePartsParser.parse(message.text),
+            isFinal: true,
+          ),
+        ),
+      );
+    }
+
+    // Assistant message
+    if (hasStructuredParts) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: _buildHistoryPartWidgets(context, message.parts, isFinal: true),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: _buildMessagePartWidgets(
+        context,
+        _MessagePartsParser.parse(message.text),
+        isFinal: true,
+      ),
+    );
+  }
 }
 
 class _MessageItem extends StatelessWidget {

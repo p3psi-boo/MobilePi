@@ -363,6 +363,10 @@ class PiSessionIndex {
   }
 
   /// Build structured parts from Pi JSONL content blocks.
+  ///
+  /// Assistant messages only emit text and thinking parts.
+  /// Tool representations come from separate toolResult messages,
+  /// so we skip `toolCall` blocks here to avoid duplicate chips.
   static List<Map<String, dynamic>> _blocksToParts(
     List<Map<String, dynamic>> blocks,
   ) {
@@ -379,12 +383,9 @@ class PiSessionIndex {
         if (thinking != null && thinking.isNotEmpty) {
           parts.add({'type': 'thinking', 'text': thinking});
         }
-      } else if (type == 'toolCall') {
-        final name = block['name']?.toString();
-        if (name != null && name.isNotEmpty) {
-          parts.add({'type': 'toolCall', 'name': name});
-        }
       }
+      // toolCall blocks are intentionally omitted — the matching
+      // toolResult message renders the tool chip with full context.
     }
     return parts;
   }
@@ -424,11 +425,9 @@ class PiSessionIndex {
         if (thinking != null) {
           parts.add('<thinking>\n$thinking\n</thinking>');
         }
-      } else if (type == 'toolCall') {
-        final name = block['name']?.toString();
-        if (name == null || name.isEmpty) continue;
-        parts.add('[工具: $name]');
       }
+      // toolCall blocks are intentionally skipped in the markdown-text
+      // fallback — tool chips are rendered from structured parts / regex.
     }
     return parts.join('\n\n').trim();
   }

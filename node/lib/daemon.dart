@@ -388,6 +388,10 @@ class NodeDaemon {
     final cursors = _parseCursorMap(
       request.payload[ProtocolPayloadKeys.cursors],
     );
+    // Force-refresh capabilities so session list and node summary are fresh.
+    _piCapabilitiesLoadedAt = null;
+    _refreshPiCapabilitiesIfStale();
+    await _piCapabilitiesRefresh;
     final events = includeEvents
         ? _db!
               .eventsAfter(cursors)
@@ -945,7 +949,6 @@ class NodeDaemon {
         channel,
         taskId,
         'running',
-        streamingText: '⤴ 恢复会话并继续...',
       );
       return runner;
     } catch (e, st) {

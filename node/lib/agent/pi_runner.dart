@@ -257,9 +257,11 @@ class PiRunner implements AgentRunner {
       case 'tool_execution_update':
         break;
       case 'tool_execution_end':
+        final toolName = event['toolName']?.toString();
         _eventController.add(
           AgentEvent(
             toolCallId: event['toolCallId']?.toString(),
+            toolName: toolName,
             toolResult: _toolResultText(event['result']),
             toolResultIsError: event['isError'] == true,
           ),

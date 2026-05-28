@@ -704,6 +704,9 @@ class NodeProvider extends ChangeNotifier {
     if (nextStreamingText == null && streamingDelta != null) {
       nextStreamingText = '${existing?.streamingText ?? ''}$streamingDelta';
     }
+    if (nextStreamingText != null && nextStreamingText.length > 24000) {
+      nextStreamingText = nextStreamingText.substring(nextStreamingText.length - 24000);
+    }
 
     if (existing != null) {
       _tasks[taskId] = existing.copyWith(
@@ -747,6 +750,7 @@ class NodeProvider extends ChangeNotifier {
     } else {
       _notifyNow();
     }
+    _pruneOldTasks();
   }
 
   void _handleSessionMessagesResponse(Map<String, dynamic> payload) {
@@ -1094,6 +1098,20 @@ class NodeProvider extends ChangeNotifier {
         messages: session.messages,
         createdAt: session.updatedAt,
       );
+    }
+    _pruneOldTasks();
+  }
+
+  void _pruneOldTasks() {
+    const maxTasks = 200;
+    if (_tasks.length <= maxTasks) return;
+    final toRemove = _tasks.entries
+        .where((e) => e.value.status != 'running')
+        .map((e) => e.key)
+        .take(_tasks.length - maxTasks)
+        .toList();
+    for (final key in toRemove) {
+      _tasks.remove(key);
     }
   }
 

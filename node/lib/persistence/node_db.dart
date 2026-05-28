@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
@@ -32,6 +33,8 @@ class NodeDatabase {
     }
 
     _db = sqlite3.open(_dbPath);
+    _db.execute('PRAGMA journal_mode=WAL;');
+    _db.execute('PRAGMA busy_timeout=5000;');
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS node_info (
@@ -283,7 +286,9 @@ class NodeDatabase {
         payload: payload,
         createdAt: created,
       );
-    } catch (_) {
+    } catch (e, st) {
+      final log = Logger('NodeDatabase');
+      log.warning('event=db.append_event_failed streamId=$streamId', e, st);
       _db.execute('ROLLBACK');
       rethrow;
     }
@@ -380,7 +385,14 @@ class NodeDatabase {
     }).toList();
   }
 
+  /// Purge old events to prevent unbounded DB growth.
+  void purgeOldEvents({int maxAgeDays = 7, int keepPerStream = 500}) {
+    final cutoff = DateTime.now().toUtc().subtract(Duration(days: maxAgeDays)).toIso8601String();
+    _db.execute('DELETE FROM events WHERE created_at < ?', [cutoff]);
+  }
+
   void close() {
+    purgeOldEvents();
     _db.dispose();
   }
 }

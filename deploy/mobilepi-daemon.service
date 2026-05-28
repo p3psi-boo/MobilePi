@@ -1,0 +1,22 @@
+[Unit]
+Description=MobilePi Node Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mobilepi
+Group=mobilepi
+WorkingDirectory=/opt/mobilepi
+ExecStart=/opt/mobilepi/daemon --hub-url ${MOBILE_PI_HUB_WS_URL} --tenant-key ${MOBILE_PI_TENANT_KEY}
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+KillSignal=SIGTERM
+EnvironmentFile=/etc/mobilepi/daemon.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mobilepi-daemon
+
+[Install]
+WantedBy=multi-user.target

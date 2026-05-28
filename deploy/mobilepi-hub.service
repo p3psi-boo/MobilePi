@@ -1,0 +1,22 @@
+[Unit]
+Description=MobilePi Hub Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mobilepi
+Group=mobilepi
+WorkingDirectory=/opt/mobilepi
+ExecStart=/opt/mobilepi/hub --port 8080 --tenant-key ${MOBILE_PI_TENANT_KEY}
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+KillSignal=SIGTERM
+EnvironmentFile=/etc/mobilepi/hub.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mobilepi-hub
+
+[Install]
+WantedBy=multi-user.target

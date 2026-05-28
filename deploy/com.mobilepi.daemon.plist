@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mobilepi.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/mobilepi/daemon</string>
+        <string>--hub-url</string>
+        <string>wss://your-hub.example.com/ws</string>
+        <string>--tenant-key</string>
+        <string>your-tenant-key</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/var/log/mobilepi-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/mobilepi-daemon.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MOBILE_PI_SANDBOX_MODE</key>
+        <string>macos</string>
+        <key>MOBILE_PI_CPU_LIMIT</key>
+        <string>50%</string>
+        <key>MOBILE_PI_MEM_LIMIT</key>
+        <string>2G</string>
+    </dict>
+</dict>
+</plist>

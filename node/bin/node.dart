@@ -110,6 +110,12 @@ void main(List<String> arguments) async {
     exit(0);
   });
 
+  ProcessSignal.sigterm.watch().listen((_) async {
+    Logger('NodeMain').info('event=node.sigterm_received shutting_down');
+    await daemon.stop();
+    exit(0);
+  });
+
   await daemon.start();
 }
 

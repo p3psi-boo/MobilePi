@@ -105,6 +105,12 @@ void main(List<String> arguments) async {
     exit(0);
   });
 
+  ProcessSignal.sigterm.listen((_) async {
+    Logger('HubMain').info('signal=SIGTERM action=shutdown');
+    await server.shutdown();
+    exit(0);
+  });
+
   await server.start();
 }
 

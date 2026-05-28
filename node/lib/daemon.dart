@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:logging/logging.dart';
 import 'package:uuid/uuid.dart';
@@ -51,6 +52,7 @@ class NodeDaemon {
   Completer<void>? _shutdownCompleter;
   Timer? _reconnectTimer;
   bool _stopping = false;
+  final _random = Random();
   final Map<String, WebSocketChannel> _clients = {};
 
   final String? dbPath;
@@ -207,7 +209,7 @@ class NodeDaemon {
 
   void _scheduleHubReconnect(String normalizedHubUrl) {
     if (_stopping || _reconnectTimer?.isActive == true) return;
-    _reconnectTimer = Timer(const Duration(seconds: 2), () {
+    _reconnectTimer = Timer(Duration(milliseconds: 1000 + _random.nextInt(3000)), () {
       _reconnectTimer = null;
       unawaited(_connectHub(normalizedHubUrl));
     });
@@ -229,14 +231,28 @@ class NodeDaemon {
     }
     _runnerSubs.clear();
     for (final runner in _activeRunners.values) {
-      await runner.abort();
+      try {
+        await runner.abort().timeout(const Duration(seconds: 5));
+      } catch (e) {
+        _logger.warning('event=runner.abort_timeout', e);
+      }
     }
     _activeRunners.clear();
     for (final channel in _clients.values) {
-      await channel.sink.close();
+      try {
+        await channel.sink.close().timeout(const Duration(seconds: 3));
+      } catch (e) {
+        _logger.warning('event=ws.client_close_timeout', e);
+      }
     }
     _clients.clear();
-    await _hubChannel?.sink.close();
+    if (_hubChannel != null) {
+      try {
+        await _hubChannel!.sink.close().timeout(const Duration(seconds: 3));
+      } catch (e) {
+        _logger.warning('event=ws.hub_close_timeout', e);
+      }
+    }
     _hubChannel = null;
     await _server?.close();
     _db?.close();
@@ -1046,7 +1062,8 @@ class NodeDaemon {
       }
       if (parts.isEmpty) return null;
       return parts.join('\n');
-    } catch (_) {
+    } catch (e) {
+      // Session lines may contain non-JSON content (timestamps, etc.); this is normal.
       return null;
     }
   }
@@ -1493,8 +1510,8 @@ class NodeDaemon {
     if (model != null && model.isNotEmpty) {
       payload[ProtocolPayloadKeys.model] = model;
     }
-    if (streamingText != null) payload['streamingText'] = streamingText;
-    if (streamingDelta != null) payload['streamingDelta'] = streamingDelta;
+    if (streamingText != null) payload['streamingText'] = streamingText!.length > 20000 ? '...(truncated)...${streamingText!.substring(streamingText!.length - 20000)}' : streamingText;
+    if (streamingDelta != null) payload['streamingDelta'] = streamingDelta!.length > 20000 ? '...(truncated)...${streamingDelta!.substring(streamingDelta!.length - 20000)}' : streamingDelta;
     if (progressPercent != null) payload['progressPercent'] = progressPercent;
     if (linesAdded != null) payload['linesAdded'] = linesAdded;
     if (linesRemoved != null) payload['linesRemoved'] = linesRemoved;
@@ -1545,7 +1562,7 @@ class NodeDaemon {
       channel.sink.add(jsonEncode(messageJson));
     } catch (e) {
       _logger.warning(
-        'event=ws.send_failed ${summarizeJsonMessage(messageJson)}',
+        'event=ws.send_json_failed ${summarizeJsonMessage(messageJson)}',
         e,
       );
     }

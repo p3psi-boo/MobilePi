@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:logging/logging.dart';
 import 'package:uuid/uuid.dart';
@@ -245,7 +246,8 @@ class WebSocketService {
     _logger.info(
       'event=ws.reconnect_scheduled ${logFields({'delayMs': _backoff.inMilliseconds, 'url': _wsUrl})}',
     );
-    _reconnectTimer = Timer(_backoff, connect);
+    final jitter = Duration(milliseconds: Random().nextInt(1000));
+    _reconnectTimer = Timer(_backoff + jitter, connect);
 
     // 指数退避
     _backoff = Duration(

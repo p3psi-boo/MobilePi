@@ -23,6 +23,7 @@ class HubServer {
   final Map<WebSocketChannel, String> _clientIdsByChannel = {};
   int _peerSeq = 0;
   int _messageSeq = 0;
+  Timer? _cleanupTimer;
 
   HubServer({required this.port, required String tenantKey, this.host = '0.0.0.0'})
     : tenantKey = _normalizeTenantKey(tenantKey) {
@@ -55,11 +56,20 @@ class HubServer {
     _logger.info(
       'event=hub.started ${logFields({'address': _server!.address.host, 'port': _server!.port, 'wsUrl': wsUrl})}',
     );
+    _cleanupTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      _logger.fine('event=hub.periodic_cleanup ${logFields({'clients': _clients.length, 'daemons': _daemons.length, 'summaries': _nodeSummaries.length})}');
+    });
   }
 
   Future<void> shutdown() async {
-    for (final channel in [..._clients.values, ..._daemons.values]) {
-      await channel.sink.close();
+    _cleanupTimer?.cancel();
+    try {
+      await Future.wait([
+        for (final channel in [..._clients.values, ..._daemons.values])
+          channel.sink.close().timeout(const Duration(seconds: 3)),
+      ]).timeout(const Duration(seconds: 10));
+    } on TimeoutException {
+      _logger.warning('event=hub.shutdown_timeout');
     }
     _clients.clear();
     _daemons.clear();
@@ -73,6 +83,19 @@ class HubServer {
   FutureOr<Response> _router(Request request) {
     if (request.url.path == 'ws') {
       return webSocketHandler(_handleSocket)(request);
+    }
+    if (request.url.path == 'health' || request.url.path == 'healthz') {
+      return Response.ok(
+        jsonEncode({
+          'status': 'ok',
+          'timestamp': DateTime.now().toUtc().toIso8601String(),
+          'connections': {
+            'clients': _clients.length,
+            'daemons': _daemons.length,
+          },
+        }),
+        headers: {'content-type': 'application/json'},
+      );
     }
     return Response.ok('MobilePi Hub OK - ${DateTime.now().toIso8601String()}');
   }

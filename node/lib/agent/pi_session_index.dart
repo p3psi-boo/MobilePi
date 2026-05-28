@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:logging/logging.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
 import 'package:path/path.dart' as p;
 
@@ -11,6 +12,8 @@ import 'pi_capabilities.dart';
 /// Pi's RPC exposes the active session, but Pi's own session selector lists
 /// recent sessions by scanning `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`.
 class PiSessionIndex {
+  static final _logger = Logger('PiSessionIndex');
+
   final String cwd;
   final String agentDir;
 
@@ -177,7 +180,9 @@ class PiSessionIndex {
                 ),
               );
             }
-          } catch (_) {}
+          } catch (e, st) {
+            _logger.warning('event=pi_session_index.parse_error', e, st);
+          }
         }
       }
 
@@ -186,7 +191,8 @@ class PiSessionIndex {
         'totalCount': totalCount,
         'nextBeforeIndex': start,
       };
-    } catch (_) {
+    } catch (e, st) {
+      _logger.warning('event=pi_session_index.parse_error', e, st);
       return null;
     }
   }
@@ -209,7 +215,9 @@ class PiSessionIndex {
             header = Map<String, dynamic>.from(decoded);
             break;
           }
-        } catch (_) {}
+        } catch (e, st) {
+          _logger.warning('event=pi_session_index.parse_error', e, st);
+        }
       }
       if (header == null) return null;
       final id = header['id']?.toString();
@@ -294,7 +302,9 @@ class PiSessionIndex {
               }
             }
           }
-        } catch (_) {}
+        } catch (e, st) {
+          _logger.warning('event=pi_session_index.parse_error', e, st);
+        }
       }
 
       final created = _parseIsoDate(header['timestamp']);
@@ -314,7 +324,8 @@ class PiSessionIndex {
         firstMessage: firstMessage.isEmpty ? '(no messages)' : firstMessage,
         messages: messages,
       );
-    } catch (_) {
+    } catch (e, st) {
+      _logger.warning('event=pi_session_index.parse_error', e, st);
       return null;
     }
   }

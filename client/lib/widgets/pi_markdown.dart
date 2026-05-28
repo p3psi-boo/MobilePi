@@ -113,8 +113,12 @@ class PiMarkdown extends StatelessWidget {
         codeBuilder: (context, name, code, closed) {
           // 去掉末尾多余换行，避免代码块底部出现额外空白行
           final trimmed = code.replaceAll(RegExp(r'\n+$'), '');
-          return Container(
-            width: double.infinity,
+          // 终端风格宽度：80 列等宽，手机屏幕外可以左右滑动。
+          // 这样 Agent 输出的 ASCII 图表不会因为换行而变形。
+          final charWidth = fontSize * 0.92 * 0.6; // approximate monospace char width
+          final terminalWidth = 80 * charWidth;
+          final scrollableChild = Container(
+            constraints: BoxConstraints(minWidth: terminalWidth),
             margin: const EdgeInsets.symmetric(vertical: 6),
             decoration: BoxDecoration(
               color: codeBlockBg,
@@ -168,19 +172,25 @@ class PiMarkdown extends StatelessWidget {
                   ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-                  child: SelectableText(
-                    trimmed,
-                    style: (baseStyle ?? const TextStyle()).copyWith(
-                      fontFamily: 'monospace',
-                      fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
-                      fontSize: fontSize * 0.92,
-                      color: codeBlockTextColor,
-                      height: 1.45,
+                  child: IntrinsicWidth(
+                    child: SelectableText(
+                      trimmed,
+                      style: (baseStyle ?? const TextStyle()).copyWith(
+                        fontFamily: 'monospace',
+                        fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                        fontSize: fontSize * 0.92,
+                        color: codeBlockTextColor,
+                        height: 1.45,
+                      ),
                     ),
                   ),
                 ),
               ],
             ),
+          );
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: scrollableChild,
           );
         },
       ),

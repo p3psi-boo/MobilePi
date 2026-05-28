@@ -563,7 +563,8 @@ class _OutputViewState extends State<_OutputView> {
 }
 
 /// Streaming text rendered as markdown.
-/// No structural tags — pure text.
+/// Structural tags (thinking, tool markers, etc.) are stripped —
+/// they are rendered separately via structured events.
 List<Widget> _buildStreamingTextWidgets(
   BuildContext context,
   String streamingText, {
@@ -572,9 +573,12 @@ List<Widget> _buildStreamingTextWidgets(
 }) {
   final theme = Theme.of(context);
   final cs = theme.colorScheme;
-  final text = streamingText.length <= _maxRenderedStreamingChars
+  var text = streamingText.length <= _maxRenderedStreamingChars
       ? streamingText
       : streamingText.substring(streamingText.length - _maxRenderedStreamingChars);
+  // Strip structural markers — tool chips / results / etc. are rendered
+  // from structured events, not from embedded text markers.
+  text = text_utils.stripTags(text);
   if (text.trim().isEmpty) return [];
   final widget = RepaintBoundary(
     child: PiMarkdown(
@@ -592,18 +596,23 @@ List<Widget> _buildStreamingTextWidgets(
 }
 
 /// Render structured tool events as chips.
+///
+/// Merges call+result pairs into a single chip so the UI shows one
+/// entry per tool execution, matching pi-tui's single-line display.
 Widget _buildStreamingToolChips(
   BuildContext context,
   List<StreamingToolEvent> toolEvents, {
   bool isFinal = true,
 }) {
-  final theme = Theme.of(context);
-  final cs = theme.colorScheme;
   final chips = <Widget>[];
+  final consumed = <int>{};
 
   for (int i = 0; i < toolEvents.length; i++) {
+    if (consumed.contains(i)) continue;
     final ev = toolEvents[i];
+
     if (ev.isResult) {
+      // Standalone result — render directly.
       chips.add(
         _ToolChip(
           key: ValueKey('tr_$i'),
@@ -612,23 +621,38 @@ Widget _buildStreamingToolChips(
           content: ev.resultText,
         ),
       );
+      consumed.add(i);
     } else {
-      // Check if there's a matching result later
-      bool hasResult = false;
+      // Call event — look for a matching result anywhere later.
+      int? resultIdx;
       for (int j = i + 1; j < toolEvents.length; j++) {
         if (toolEvents[j].isResult && toolEvents[j].name == ev.name) {
-          hasResult = true;
+          resultIdx = j;
           break;
         }
       }
-      chips.add(
-        _ToolChip(
-          key: ValueKey('tc_$i'),
-          toolName: ev.name,
-          status: null,
-          isLoading: !isFinal && !hasResult,
-        ),
-      );
+
+      if (resultIdx != null) {
+        final res = toolEvents[resultIdx];
+        consumed.add(resultIdx);
+        chips.add(
+          _ToolChip(
+            key: ValueKey('tc_${i}_r'),
+            toolName: ev.name,
+            status: res.isError ? '失败' : '成功',
+            content: res.resultText,
+          ),
+        );
+      } else {
+        chips.add(
+          _ToolChip(
+            key: ValueKey('tc_$i'),
+            toolName: ev.name,
+            status: null,
+            isLoading: !isFinal,
+          ),
+        );
+      }
     }
   }
 

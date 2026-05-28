@@ -17,6 +17,7 @@ final RegExp _toolResultRegex = RegExp(
   dotAll: true,
 );
 final RegExp _openThinkingRegex = RegExp(r'<thinking>.*$', dotAll: true);
+final RegExp _toolMarkerRegex = RegExp(r'\[工具: .*?\]');
 
 final Map<String, String> _stripCache = <String, String>{};
 
@@ -44,6 +45,7 @@ String stripTags(String text) {
       .replaceAll(_thinkingRegex, '')
       .replaceAll(_openThinkingRegex, '')
       .replaceAll(_toolResultRegex, '')
+      .replaceAll(_toolMarkerRegex, '')
       .trim();
 
   if (_stripCache.length >= _kMaxCacheSize) {

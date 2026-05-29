@@ -4,3 +4,6 @@
 [submodule "refs/pi-mono"]
 	path = refs/pi-mono
 	url = https://github.com/badlogic/pi-mono
+[submodule "refs/howcode"]
+	path = refs/howcode
+	url = https://github.com/IgorWarzocha/howcode.git

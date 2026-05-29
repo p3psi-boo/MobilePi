@@ -241,6 +241,27 @@ class _OutputViewState extends State<_OutputView> {
   bool _isPrepending = false;
   bool _hasMore = true;
 
+  /// Count of messages loaded before the currently visible window.
+  /// updated each time new history arrives.
+  int _previousCount = 0;
+
+  /// Scroll position snapshots for howcode-style delta correction on history load.
+  double? _pendingScrollHeight;
+  double? _pendingScrollOffset;
+
+  /// Set of turn indices (0-based position among turns) that the user
+  /// manually expanded.  The latest turn is always expanded; this set
+  /// tracks additional user-expanded turns.
+  final _expandedTurnKeys = <int>{};
+  /// Incremented whenever _expandedTurnKeys changes, used to trigger
+  /// Selector rebuilds when the user toggles a turn.
+  int _collapseVersion = 0;
+
+  /// Stick-to-bottom state machine — mirrors howcode's shouldStickToBottom.
+  bool _shouldStickToBottom = true;
+  bool _programmaticScroll = false;
+  static const _autoScrollThreshold = 50.0;
+
   @override
   void initState() {
     super.initState();
@@ -251,6 +272,8 @@ class _OutputViewState extends State<_OutputView> {
       _lastMessageCount = task.messages.length;
       _lastStreamingText = task.streamingText ?? '';
       _hasMore = task.nextBeforeIndex == null || task.nextBeforeIndex! > 0;
+      _previousCount = (task.totalCount ?? 0) - task.messages.length;
+      if (_previousCount < 0) _previousCount = 0;
 
       if (task.messages.isEmpty &&
           task.sessionPath != null &&
@@ -279,29 +302,47 @@ class _OutputViewState extends State<_OutputView> {
     super.dispose();
   }
 
+  void _loadEarlier() {
+    final provider = context.read<NodeProvider>();
+    final task = provider.getTask(widget.taskId);
+    if (task == null || !_hasMore || _isLoadingMore) return;
+    if (task.sessionPath == null || task.sessionPath!.isEmpty) return;
+
+    // Preserve scroll offset for howcode-style delta correction.
+    if (_scrollController.hasClients) {
+      _pendingScrollHeight = _scrollController.position.maxScrollExtent;
+      _pendingScrollOffset = _scrollController.offset;
+    }
+
+    setState(() {
+      _isLoadingMore = true;
+      _isPrepending = true;
+    });
+    provider.requestSessionMessages(
+      task.nodeId,
+      task.id,
+      task.sessionPath!,
+      limit: 20,
+      beforeIndex: task.nextBeforeIndex,
+    );
+  }
+
   void _onScroll() {
     if (!_scrollController.hasClients) return;
+    // Do not update stick-to-bottom during programmatic scrolls.
+    if (_programmaticScroll) return;
+
     final pixels = _scrollController.position.pixels;
-    if (pixels <= 50) {
-      final provider = context.read<NodeProvider>();
-      final task = provider.getTask(widget.taskId);
-      if (task != null &&
-          _hasMore &&
-          !_isLoadingMore &&
-          task.sessionPath != null &&
-          task.sessionPath!.isNotEmpty) {
-        setState(() {
-          _isLoadingMore = true;
-          _isPrepending = true;
-        });
-        provider.requestSessionMessages(
-          task.nodeId,
-          task.id,
-          task.sessionPath!,
-          limit: 20,
-          beforeIndex: task.nextBeforeIndex,
-        );
-      }
+    final max = _scrollController.position.maxScrollExtent;
+
+    // Update stick-to-bottom flag — analogous to howcode's
+    // shouldStickToBottomRef = isScrollContainerNearBottom(...).
+    final wasStick = _shouldStickToBottom;
+    _shouldStickToBottom = (max - pixels) < _autoScrollThreshold;
+    if (_shouldStickToBottom != wasStick) {
+      // Rebuild so the scroll-to-bottom button appears/disappears.
+      // Provider's Selector will skip since messages haven't changed.
+      setState(() {});
     }
   }
 
@@ -320,6 +361,8 @@ class _OutputViewState extends State<_OutputView> {
         } else {
           shouldScroll = true;
         }
+        _previousCount = (task.totalCount ?? 0) - task.messages.length;
+        if (_previousCount < 0) _previousCount = 0;
         setState(() {
           _isLoadingMore = false;
           _isPrepending = false;
@@ -345,22 +388,27 @@ class _OutputViewState extends State<_OutputView> {
     }
     _lastStreamingText = currentStreaming;
 
-    if (shouldScroll) {
+    // Only scroll if stick-to-bottom is engaged — if the user scrolled up
+    // to read history, streaming deltas won't jump them back down.
+    if (shouldScroll && _shouldStickToBottom) {
       _scrollToBottom();
     }
   }
 
   void _adjustScrollAfterPrepend() {
-    if (!_scrollController.hasClients) return;
-    final oldMaxScrollExtent = _scrollController.position.maxScrollExtent;
-    final oldScrollOffset = _scrollController.offset;
+    final oldMaxScrollExtent = _pendingScrollHeight;
+    final oldScrollOffset = _pendingScrollOffset;
+    _pendingScrollHeight = null;
+    _pendingScrollOffset = null;
+
+    if (!_scrollController.hasClients || oldMaxScrollExtent == null) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
       final newMaxScrollExtent = _scrollController.position.maxScrollExtent;
       final difference = newMaxScrollExtent - oldMaxScrollExtent;
       if (difference > 0) {
-        _scrollController.jumpTo(oldScrollOffset + difference);
+        _scrollController.jumpTo((oldScrollOffset ?? 0) + difference);
       }
     });
   }
@@ -374,20 +422,31 @@ class _OutputViewState extends State<_OutputView> {
       if (max <= 0) return;
 
       // If user has scrolled up significantly, don't interrupt them
-      if (max - current > 150 && animate) {
+      // unless we are forcing (animate = false, used during streaming).
+      if (max - current > _autoScrollThreshold && animate) {
+        _shouldStickToBottom = false;
         return;
       }
 
-      // Use jumpTo to avoid animation overlap lag during fast streaming
+      _programmaticScroll = true;
       _scrollController.jumpTo(max);
+      _shouldStickToBottom = true;
+      _programmaticScroll = false;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    return CustomScrollView(
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final canFold = _expandedTurnKeys.isNotEmpty;
+
+    return Stack(
+      children: [
+        CustomScrollView(
       controller: _scrollController,
       slivers: [
+        // Loading indicator while fetching.
         if (_isLoadingMore)
           const SliverToBoxAdapter(
             child: Padding(
@@ -401,9 +460,38 @@ class _OutputViewState extends State<_OutputView> {
               ),
             ),
           ),
+        // History divider — clickable row to load more.
+        // Show whenever more messages exist, even before any history loads.
+        if (!_isLoadingMore && _hasMore)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 12, bottom: 8),
+              child: Center(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: _loadEarlier,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
+                    ),
+                    child: Text(
+                      _previousCount > 0
+                          ? '$_previousCount earlier messages'
+                          : 'Load earlier messages',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         SliverPadding(
           padding: const EdgeInsets.all(16),
-          sliver: Selector<NodeProvider, (List<PiSessionMessageInfo>, String?)>(
+          sliver: Selector<NodeProvider, (List<PiSessionMessageInfo>, String?, int)>(
             selector: (ctx, p) {
               final task = p.getTask(widget.taskId);
               // task-level fallback model（用于没有 per-message model 的情况）
@@ -412,12 +500,12 @@ class _OutputViewState extends State<_OutputView> {
                 final node = p.getNode(task?.nodeId ?? '');
                 fallbackModel = node?.piDefaultModel;
               }
-              return (task?.messages ?? const [], fallbackModel);
+              return (task?.messages ?? const [], fallbackModel, _collapseVersion);
             },
             shouldRebuild: (prev, next) =>
-                prev.$1.length != next.$1.length || prev.$2 != next.$2,
+                prev.$1.length != next.$1.length || prev.$2 != next.$2 || prev.$3 != next.$3,
             builder: (context, data, _) {
-              final (messages, fallbackModel) = data;
+              final (messages, fallbackModel, collapseVer) = data;
               if (messages.isEmpty) {
                 return const SliverToBoxAdapter(child: SizedBox.shrink());
               }
@@ -425,10 +513,7 @@ class _OutputViewState extends State<_OutputView> {
                 delegate: SliverChildBuilderDelegate((context, idx) {
                   final msg = messages[idx];
 
-                  // Group consecutive non-user messages into a single "turn".
-                  // If this message is non-user and the previous one was also
-                  // non-user, it was already rendered as part of the group
-                  // started earlier — skip.
+                  // Skip non-start indices within a non-user group.
                   if (idx > 0 && msg.role != 'user' && messages[idx - 1].role != 'user') {
                     return const SizedBox.shrink();
                   }
@@ -443,17 +528,45 @@ class _OutputViewState extends State<_OutputView> {
                     );
                   }
 
-                  // Collect consecutive non-user messages into a group
+                  // Collect consecutive non-user messages into a group.
                   int end = idx;
                   while (end < messages.length && messages[end].role != 'user') {
                     end++;
                   }
                   final group = messages.sublist(idx, end);
+                  final turnKey = 'turn_$idx';
 
-                  return _AgentTurnWidget(
-                    key: ValueKey('turn_$idx'),
+                  // Find the index of the LAST non-user group.
+                  int lastNonUserIdx = -1;
+                  for (int i = messages.length - 1; i >= 0; i--) {
+                    if (messages[i].role != 'user') {
+                      while (i > 0 && messages[i - 1].role != 'user') { i--; }
+                      lastNonUserIdx = i;
+                      break;
+                    }
+                  }
+
+                  final isLatest = idx == lastNonUserIdx;
+                  final isExpanded = isLatest || _expandedTurnKeys.contains(idx);
+
+                  if (isExpanded) {
+                    return _AgentTurnWidget(
+                      key: ValueKey(turnKey),
+                      messages: group,
+                      modelName: msg.model ?? fallbackModel,
+                    );
+                  }
+
+                  return _CollapsedTurnRow(
+                    key: ValueKey('collapsed_$idx'),
+                    turnKey: turnKey,
                     messages: group,
                     modelName: msg.model ?? fallbackModel,
+                    onExpand: () => setState(() {
+                      _expandedTurnKeys.add(idx);
+                      _collapseVersion++;
+                      _shouldStickToBottom = false;
+                    }),
                   );
                 }, childCount: messages.length),
               );
@@ -557,7 +670,52 @@ class _OutputViewState extends State<_OutputView> {
           ),
         ),
       ],
-    );
+    ),
+
+    // Fold All button — only visible when at least one turn is manually expanded.
+    if (canFold)
+      Positioned(
+        right: 12,
+        bottom: 88,
+        child: Material(
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(20),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: () => setState(() {
+              _expandedTurnKeys.clear();
+              _collapseVersion++;
+              _shouldStickToBottom = true;
+              _scrollToBottom(animate: false);
+            }),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Icon(Icons.unfold_less_rounded, size: 18, color: cs.onSurfaceVariant),
+            ),
+          ),
+        ),
+      ),
+
+    // Scroll-to-bottom button when not at bottom.
+    if (!_shouldStickToBottom)
+      Positioned(
+        right: 12,
+        bottom: 136,
+        child: Material(
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(20),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: () => _scrollToBottom(animate: false),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Icon(Icons.keyboard_double_arrow_down_rounded, size: 18, color: cs.onSurfaceVariant),
+            ),
+          ),
+        ),
+      ),
+  ],
+);
   }
 
 }
@@ -659,10 +817,9 @@ Widget _buildStreamingToolChips(
   if (chips.isEmpty) return const SizedBox.shrink();
   return Padding(
     padding: const EdgeInsets.symmetric(vertical: 4),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: chips,
+    child: _ToolGroupPanel(
+      chips: chips,
+      forceExpanded: !isFinal,
     ),
   );
 }
@@ -711,13 +868,11 @@ List<Widget> _buildHistoryPartWidgets(
         }
         break;
       case MessagePartType.toolCall:
-        // For historical messages, toolCall without inline result is normal
-        // — the result is a separate JSONL message.  Show a simple chip.
         widgets.add(
           _ToolChip(
             key: ValueKey('htc_$i'),
             toolName: part.name ?? '?',
-            status: '成功', // historical toolCalls always succeeded
+            status: '成功',
           ),
         );
         break;
@@ -1063,11 +1218,10 @@ List<Widget> _buildMessagePartWidgets(
         widgets.add(
           Padding(
             key: ValueKey('tg_$i'),
-            padding: EdgeInsets.zero,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: toolWidgets,
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: _ToolGroupPanel(
+              chips: toolWidgets,
+              forceExpanded: !isFinal,
             ),
           ),
         );
@@ -1109,6 +1263,110 @@ List<Widget> _buildMessagePartWidgets(
   }
 
   return widgets;
+}
+
+/// Collapsed preview row for an agent turn group.
+/// Shows model name + text preview + tool count in a single compact line.
+/// Tapping expands the turn.
+class _CollapsedTurnRow extends StatelessWidget {
+  final String turnKey;
+  final List<PiSessionMessageInfo> messages;
+  final String? modelName;
+  final VoidCallback onExpand;
+
+  const _CollapsedTurnRow({
+    super.key,
+    required this.turnKey,
+    required this.messages,
+    this.modelName,
+    required this.onExpand,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    // Preview: first assistant or non-tool text, truncated.
+    final firstNonTool = messages.firstWhere(
+      (m) => m.role != 'toolResult',
+      orElse: () => messages.first,
+    );
+    final previewRaw = firstNonTool.text.replaceAll('\n', ' ').trim();
+    final preview = previewRaw.length > 120
+        ? '${previewRaw.substring(0, 120)}…'
+        : previewRaw;
+
+    final toolCount = messages
+        .where(
+          (m) => m.role == 'toolResult' ||
+              (m.parts.isNotEmpty &&
+                  m.parts.any((p) => p.type == MessagePartType.toolCall)),
+        )
+        .length;
+
+    final label =
+        modelName != null && modelName!.isNotEmpty ? modelName! : 'Pi Agent';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: cs.surfaceContainerLow.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: onExpand,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                CircleAvatar(
+                  radius: 8,
+                  backgroundColor: cs.primaryContainer.withValues(alpha: 0.6),
+                  child: Icon(
+                    Icons.auto_awesome,
+                    size: 10,
+                    color: cs.onPrimaryContainer.withValues(alpha: 0.7),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        preview,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: cs.onSurface.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      if (toolCount > 0)
+                        Text(
+                          toolCount == 1 ? '1 tool' : '$toolCount tools',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: cs.onSurfaceVariant.withValues(alpha: 0.4),
+                            fontSize: 10,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  size: 16,
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.35),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// A grouped "turn" of consecutive non-user messages (assistant + toolResult + ...).
@@ -1365,12 +1623,23 @@ class _ThinkingBlock extends StatefulWidget {
 class _ThinkingBlockState extends State<_ThinkingBlock> {
   bool _expanded = false;
 
+  /// First line or ~80 chars of thinking content for collapsed preview.
+  String get _preview {
+    final firstLine = widget.text.split('\n').firstWhere(
+      (l) => l.trim().isNotEmpty,
+      orElse: () => '',
+    );
+    if (firstLine.length <= 80) return firstLine;
+    return '${firstLine.substring(0, 80)}…';
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
     if (!_expanded) {
-      // Collapsed: minimal inline label, Pi-style
+      // Collapsed: label + text preview, matching howcode's
+      // "Thinking — summary preview" pattern.
       return InkWell(
         onTap: () => setState(() => _expanded = true),
         child: Padding(
@@ -1386,14 +1655,35 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                 ),
               ),
               const SizedBox(width: 6),
-              Text(
-                '思考...',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant.withValues(
-                    alpha: 0.5,
+              Flexible(
+                child: RichText(
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                  text: TextSpan(
+                    children: [
+                      TextSpan(
+                        text: '思考',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant.withValues(
+                            alpha: 0.55,
+                          ),
+                          fontStyle: FontStyle.italic,
+                          height: 1.4,
+                        ),
+                      ),
+                      if (_preview.isNotEmpty)
+                        TextSpan(
+                          text: ' — $_preview',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant.withValues(
+                              alpha: 0.38,
+                            ),
+                            fontStyle: FontStyle.italic,
+                            height: 1.4,
+                          ),
+                        ),
+                    ],
                   ),
-                  fontStyle: FontStyle.italic,
-                  height: 1.4,
                 ),
               ),
             ],
@@ -1460,6 +1750,99 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
   }
 }
 
+/// Collapsible tool-call group panel — howcode-style "Tool calls (N)".
+/// Wraps a list of _ToolChip children in a single expandable container.
+class _ToolGroupPanel extends StatefulWidget {
+  final List<Widget> chips;
+  final bool forceExpanded;
+
+  const _ToolGroupPanel({
+    super.key,
+    required this.chips,
+    this.forceExpanded = false,
+  });
+
+  @override
+  State<_ToolGroupPanel> createState() => _ToolGroupPanelState();
+}
+
+class _ToolGroupPanelState extends State<_ToolGroupPanel> {
+  bool _expanded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _expanded = widget.forceExpanded;
+  }
+
+  @override
+  void didUpdateWidget(covariant _ToolGroupPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.forceExpanded && !_expanded) {
+      setState(() => _expanded = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final count = widget.chips.length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: widget.forceExpanded
+              ? null
+              : () => setState(() => _expanded = !_expanded),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.build_outlined,
+                  size: 13,
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.35),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  count == 1 ? '1 tool' : '$count tools',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontSize: 11,
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.45),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (!widget.forceExpanded) ...[
+                  const SizedBox(width: 2),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 13,
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.35),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        if (_expanded)
+          Padding(
+            padding: const EdgeInsets.only(left: 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: widget.chips,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _ToolChip extends StatefulWidget {
   final String toolName;
   final String? status;
@@ -1511,6 +1894,18 @@ class _ToolChipState extends State<_ToolChip> {
     return Icons.build;
   }
 
+  /// Preview of result content (first line or ~60 chars).
+  String get _resultPreview {
+    final text = widget.content;
+    if (text == null || text.isEmpty) return '';
+    final firstLine = text.split('\n').firstWhere(
+      (l) => l.trim().isNotEmpty,
+      orElse: () => '',
+    );
+    if (firstLine.length <= 60) return firstLine;
+    return '${firstLine.substring(0, 60)}…';
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1519,11 +1914,29 @@ class _ToolChipState extends State<_ToolChip> {
     final isSkill = widget.status == 'skill';
     final isSuccess =
         widget.status == '成功' || widget.status == 'success' || isSkill;
+    final isError = widget.status == '失败' || widget.status == 'error';
     final hasContent = widget.content != null && widget.content!.isNotEmpty;
     final canExpand = !isRunning && !isSkill && hasContent;
 
     final icon = _getIconForTool(widget.toolName, widget.status);
     final dimColor = cs.onSurfaceVariant.withValues(alpha: 0.45);
+    final preview = _resultPreview;
+
+    // Status badge widget.
+    final badge = isRunning
+        ? SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.5,
+              color: cs.primary.withValues(alpha: 0.6),
+            ),
+          )
+        : isSuccess
+            ? Icon(Icons.check_circle_outline, size: 10, color: Colors.green.withValues(alpha: 0.7))
+            : isError
+                ? Icon(Icons.error_outline, size: 10, color: cs.error.withValues(alpha: 0.65))
+                : null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1557,16 +1970,41 @@ class _ToolChipState extends State<_ToolChip> {
                         : cs.error.withValues(alpha: 0.6),
                   ),
                 const SizedBox(width: 5),
-                Text(
-                  isRunning ? '正在使用 ${widget.toolName}...' : widget.toolName,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    fontSize: 12,
-                    color: isRunning
-                        ? cs.primary.withValues(alpha: 0.5)
-                        : dimColor,
-                    fontWeight: FontWeight.w400,
+                Expanded(
+                  child: Text(
+                    isRunning
+                        ? '正在使用 ${widget.toolName}...'
+                        : widget.toolName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontSize: 12,
+                      color: isRunning
+                          ? cs.primary.withValues(alpha: 0.5)
+                          : dimColor,
+                      fontWeight: FontWeight.w400,
+                    ),
                   ),
                 ),
+                if (preview.isNotEmpty && !_expanded) ...[
+                  const SizedBox(width: 6),
+                  Flexible(
+                    flex: 2,
+                    child: Text(
+                      preview,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontSize: 11,
+                        color: cs.onSurfaceVariant.withValues(alpha: 0.3),
+                      ),
+                    ),
+                  ),
+                ],
+                if (badge != null) ...[
+                  const SizedBox(width: 5),
+                  badge,
+                ],
                 if (canExpand) ...[
                   const SizedBox(width: 2),
                   Icon(

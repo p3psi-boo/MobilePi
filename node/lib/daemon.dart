@@ -51,9 +51,37 @@ class NodeDaemon {
   WebSocketChannel? _hubChannel;
   Completer<void>? _shutdownCompleter;
   Timer? _reconnectTimer;
+  Timer? _hubHeartbeatTimer;
+  int _hubMissedPongs = 0;
+  Duration _hubBackoff = _initialHubBackoff;
   bool _stopping = false;
   final _random = Random();
   final Map<String, WebSocketChannel> _clients = {};
+
+  /// Hub 模式下当前活跃的订阅 client（clientId → 最近一次交互时间）。
+  /// 用于把主动事件精确投递给在看的 client，而非广播给所有人。
+  /// daemon 收不到 hub 的 client 断开通知，故靠 TTL 过期 + 每次交互刷新。
+  final Map<String, DateTime> _subscriberClients = {};
+  static const _subscriberTtl = Duration(minutes: 5);
+
+  // Hub 连接探活与重连退避（与 client 端 WebSocketService 对齐）。
+  static const _hubHeartbeatInterval = Duration(seconds: 30);
+  static const _maxHubMissedPongs = 3;
+  static const _initialHubBackoff = Duration(seconds: 1);
+  static const _maxHubBackoff = Duration(seconds: 30);
+
+  /// permessage-deflate 压缩协商；可用 env `MOBILE_PI_WS_COMPRESSION=off` 关闭。
+  final CompressionOptions _wsCompression = _resolveCompression();
+
+  static CompressionOptions _resolveCompression() {
+    final raw = Platform.environment['MOBILE_PI_WS_COMPRESSION']
+        ?.trim()
+        .toLowerCase();
+    const disabledValues = {'false', '0', 'off', 'no'};
+    return disabledValues.contains(raw)
+        ? CompressionOptions.compressionOff
+        : CompressionOptions.compressionDefault;
+  }
 
   final String? dbPath;
   final AgentRunnerFactory _runnerFactory;
@@ -129,7 +157,10 @@ class NodeDaemon {
 
     await for (final request in _server!) {
       if (request.uri.path == '/ws') {
-        final socket = await WebSocketTransformer.upgrade(request);
+        final socket = await WebSocketTransformer.upgrade(
+          request,
+          compression: _wsCompression,
+        );
         final channel = IOWebSocketChannel(socket);
         final clientId = 'client-${const Uuid().v4()}';
         _clients[clientId] = channel;
@@ -169,7 +200,13 @@ class NodeDaemon {
     );
 
     try {
-      final channel = WebSocketChannel.connect(Uri.parse(normalizedHubUrl));
+      // 出站连接显式开启 permessage-deflate（弱网带宽优化）；WebSocketChannel.connect
+      // 不暴露压缩选项，故用 dart:io 的 WebSocket.connect 再包成 channel。
+      final socket = await WebSocket.connect(
+        normalizedHubUrl,
+        compression: _wsCompression,
+      );
+      final channel = IOWebSocketChannel(socket);
       _hubChannel = channel;
       channel.stream.listen(
         (data) => _handleMessage('hub', channel, data),
@@ -183,6 +220,7 @@ class NodeDaemon {
         },
       );
       await _sendNodeHello(channel);
+      _startHubHeartbeat(normalizedHubUrl, channel);
     } catch (e, st) {
       _logger.warning(
         'event=hub.connect_failed ${logField('hubUrl', normalizedHubUrl)}',
@@ -201,27 +239,86 @@ class NodeDaemon {
     _logger.warning(
       'event=hub.disconnected ${logField('hubUrl', normalizedHubUrl)}',
     );
+    _cancelHubHeartbeat();
     if (identical(_hubChannel, channel)) {
       _hubChannel = null;
     }
     _scheduleHubReconnect(normalizedHubUrl);
   }
 
+  /// 周期性向 Hub 发送 ping 探活。半开连接（TCP 不报错但实际不通）下，
+  /// 连续 [_maxHubMissedPongs] 次未收到 pong 即判定掉线并主动重连，
+  /// 避免 daemon 自以为在线而指令石沉大海。
+  void _startHubHeartbeat(String normalizedHubUrl, WebSocketChannel channel) {
+    _cancelHubHeartbeat();
+    _hubMissedPongs = 0;
+    _hubHeartbeatTimer = Timer.periodic(_hubHeartbeatInterval, (_) {
+      if (_stopping || !identical(_hubChannel, channel)) return;
+      if (_hubMissedPongs >= _maxHubMissedPongs) {
+        _logger.warning(
+          'event=hub.heartbeat_timeout ${logFields({'missedPongs': _hubMissedPongs, 'maxMissedPongs': _maxHubMissedPongs})}',
+        );
+        _cancelHubHeartbeat();
+        unawaited(channel.sink.close());
+        _handleHubDisconnected(normalizedHubUrl, channel);
+        return;
+      }
+      _sendHubPing(channel);
+      _hubMissedPongs++;
+    });
+  }
+
+  void _cancelHubHeartbeat() {
+    _hubHeartbeatTimer?.cancel();
+    _hubHeartbeatTimer = null;
+  }
+
+  void _sendHubPing(WebSocketChannel channel) {
+    final ping = MobilePiMessage(
+      messageId: const Uuid().v4(),
+      from: 'node:$nodeId',
+      to: 'hub',
+      type: MessageType.ping,
+      payload: const {},
+    );
+    try {
+      channel.sink.add(jsonEncode(ping.toJson()));
+    } catch (e) {
+      _logger.warning('event=hub.ping_failed', e);
+    }
+  }
+
   void _scheduleHubReconnect(String normalizedHubUrl) {
     if (_stopping || _reconnectTimer?.isActive == true) return;
-    _reconnectTimer = Timer(Duration(milliseconds: 1000 + _random.nextInt(3000)), () {
+    final jitterMs = _random.nextInt(1000);
+    final delay = _hubBackoff + Duration(milliseconds: jitterMs);
+    _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
       unawaited(_connectHub(normalizedHubUrl));
     });
     _logger.info(
-      'event=hub.reconnect_scheduled ${logFields({'hubUrl': normalizedHubUrl, 'delayMs': 2000})}',
+      'event=hub.reconnect_scheduled ${logFields({'hubUrl': normalizedHubUrl, 'delayMs': delay.inMilliseconds})}',
     );
+    // 指数退避：1s → 2s → … → 30s（封顶）。连接健康后由 _onHubHealthy 复位。
+    _hubBackoff = Duration(
+      milliseconds: (_hubBackoff.inMilliseconds * 2).clamp(
+        _initialHubBackoff.inMilliseconds,
+        _maxHubBackoff.inMilliseconds,
+      ),
+    );
+  }
+
+  /// 收到 Hub 的有效响应（pong）即视为连接健康，复位退避与漏包计数。
+  void _onHubHealthy() {
+    _hubMissedPongs = 0;
+    _hubBackoff = _initialHubBackoff;
   }
 
   Future<void> stop() async {
     _stopping = true;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _cancelHubHeartbeat();
     for (final watch in _sessionWatchesByTask.values) {
       watch.subscription?.cancel();
     }
@@ -279,6 +376,9 @@ class NodeDaemon {
         case MessageType.ping:
           _sendPong(channel, message.messageId, message.from);
           break;
+        case MessageType.pong:
+          if (clientId == 'hub') _onHubHealthy();
+          break;
         case MessageType.hello:
         case MessageType.resume:
         case MessageType.command:
@@ -304,6 +404,8 @@ class NodeDaemon {
     WebSocketChannel channel,
     MobilePiMessage message,
   ) {
+    // 任何来自 client 的交互都刷新其订阅活跃时间，用于事件精确投递。
+    _trackSubscriber(message);
     switch (message.type) {
       case MessageType.hello:
         unawaited(_sendResumeResponse(channel, message, includeEvents: false));
@@ -407,7 +509,7 @@ class NodeDaemon {
     final response = MobilePiMessage(
       messageId: const Uuid().v4(),
       from: 'node:$nodeId',
-      to: 'client',
+      to: _replyTarget(request),
       type: MessageType.response,
       payload: payload,
     );
@@ -590,7 +692,7 @@ class NodeDaemon {
     final response = MobilePiMessage(
       messageId: const Uuid().v4(),
       from: 'node:$nodeId',
-      to: 'client',
+      to: _replyTarget(request),
       type: MessageType.response,
       payload: {ProtocolPayloadKeys.responseTo: request.messageId, ...payload},
     );
@@ -605,7 +707,7 @@ class NodeDaemon {
     final response = MobilePiMessage(
       messageId: const Uuid().v4(),
       from: 'node:$nodeId',
-      to: 'client',
+      to: _replyTarget(request),
       type: MessageType.error,
       payload: {
         ProtocolPayloadKeys.responseTo: request.messageId,
@@ -1076,23 +1178,12 @@ class NodeDaemon {
     String status, {
     String? streamingDelta,
   }) {
-    if (_hubChannel != null) {
-      _sendTaskUpdate(
-        _hubChannel!,
-        taskId,
-        status,
-        streamingDelta: streamingDelta,
-      );
-      return;
-    }
-    for (final channel in _clients.values) {
-      _sendTaskUpdate(
-        channel,
-        taskId,
-        status,
-        streamingDelta: streamingDelta,
-      );
-    }
+    // 事件追加一次、由 _emitEvent 统一 fan out 到 hub 订阅者 / 所有直连 client，
+    // 故此处只调用一次即可（不再按 client 逐个调用，避免重复 appendEvent）。
+    final channel = _hubChannel ??
+        (_clients.isEmpty ? null : _clients.values.first);
+    if (channel == null) return;
+    _sendTaskUpdate(channel, taskId, status, streamingDelta: streamingDelta);
   }
 
   Future<void> _handleSessionMessagesRequest(
@@ -1140,7 +1231,7 @@ class NodeDaemon {
       final response = MobilePiMessage(
         messageId: message.messageId,
         from: 'node:$nodeId',
-        to: 'client',
+        to: _replyTarget(message),
         type: MessageType.response,
         payload: {
           ProtocolPayloadKeys.responseTo: message.messageId,
@@ -1213,7 +1304,7 @@ class NodeDaemon {
     final response = MobilePiMessage(
       messageId: message.messageId,
       from: 'node:$nodeId',
-      to: 'client',
+      to: _replyTarget(message),
       type: MessageType.response,
       payload: {
         ProtocolPayloadKeys.responseTo: message.messageId,
@@ -1277,7 +1368,7 @@ class NodeDaemon {
     final response = MobilePiMessage(
       messageId: message.messageId,
       from: 'node:$nodeId',
-      to: 'client',
+      to: _replyTarget(message),
       type: MessageType.response,
       payload: {
         ProtocolPayloadKeys.responseTo: message.messageId,
@@ -1475,7 +1566,7 @@ class NodeDaemon {
             payload: payload,
           );
     if (event != null) {
-      _sendJson(channel, _buildTaskEventJson(event));
+      _emitEvent(event);
     }
   }
 
@@ -1490,7 +1581,7 @@ class NodeDaemon {
       type: eventType,
       payload: payload,
     );
-    _sendJson(channel, _buildTaskEventJson(event));
+    _emitEvent(event);
   }
 
   Map<String, dynamic> _buildTaskUpdatePayload(
@@ -1525,15 +1616,65 @@ class NodeDaemon {
     return payload;
   }
 
-  Map<String, dynamic> _buildTaskEventJson(NodeEventRecord event) {
+  Map<String, dynamic> _buildTaskEventJson(
+    NodeEventRecord event, {
+    String to = 'client',
+  }) {
     final message = MobilePiMessage(
       messageId: const Uuid().v4(),
       from: 'node:$nodeId',
-      to: 'client',
+      to: to,
       type: MessageType.event,
       payload: event.toProtocolPayload(),
     );
     return message.toJson();
+  }
+
+  /// 分发一条主动事件（任务状态/流式输出）给所有"在看"的 client。
+  /// - Hub 模式：对每个活跃订阅者以 `to:<clientId>` 发往 hub，由 hub 精确投递，
+  ///   不再广播给无关 client（省带宽 + 避免跨 client 泄漏）。无已知订阅者时回退
+  ///   为 `to:'client'` 广播，避免事件在订阅建立前丢失。
+  /// - 直连模式：发往所有已连接 client 通道。
+  void _emitEvent(NodeEventRecord event) {
+    final hub = _hubChannel;
+    if (hub != null) {
+      final subscribers = _activeSubscriberIds();
+      if (subscribers.isEmpty) {
+        _sendJson(hub, _buildTaskEventJson(event));
+        return;
+      }
+      for (final clientId in subscribers) {
+        _sendJson(hub, _buildTaskEventJson(event, to: clientId));
+      }
+      return;
+    }
+    for (final channel in _clients.values) {
+      _sendJson(channel, _buildTaskEventJson(event));
+    }
+  }
+
+  /// 记录/刷新一个 client 订阅者。来自 hub/daemon 自身的消息忽略。
+  void _trackSubscriber(MobilePiMessage message) {
+    final from = message.from.trim();
+    if (from.isEmpty || from == 'hub' || from.startsWith('node:')) return;
+    _subscriberClients[from] = DateTime.now();
+  }
+
+  /// 当前未过期的订阅者 clientId（顺带剔除过期项）。
+  List<String> _activeSubscriberIds() {
+    final now = DateTime.now();
+    _subscriberClients.removeWhere(
+      (_, seenAt) => now.difference(seenAt) > _subscriberTtl,
+    );
+    // 排除广播哨兵 'client'（直连模式遗留），仅保留具体 clientId。
+    return _subscriberClients.keys.where((id) => id != 'client').toList();
+  }
+
+  /// 请求-响应的回执目标：优先回到具体请求方（精确路由），
+  /// 缺省回退为 'client'（兼容旧 client 与直连模式）。
+  String _replyTarget(MobilePiMessage request) {
+    final from = request.from.trim();
+    return from.isEmpty ? 'client' : from;
   }
 
   String _taskEventType(

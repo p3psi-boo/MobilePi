@@ -7,6 +7,8 @@ import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
 
+import 'ws_connect.dart';
+
 /// Client 端 WebSocket 连接服务
 ///
 /// - 连接 Hub，而不是直接连接 Daemon
@@ -148,11 +150,15 @@ class WebSocketService {
       'event=ws.connect_start ${logFields({'url': _wsUrl, 'clientId': _clientId})}',
     );
     _cancelReconnect();
+    unawaited(_openChannel());
+  }
 
+  Future<void> _openChannel() async {
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+      final channel = await connectWs(_wsUrl);
+      _channel = channel;
 
-      _channel!.stream.listen(
+      channel.stream.listen(
         _onMessage,
         onDone: _onDisconnected,
         onError: (e) {
@@ -175,6 +181,8 @@ class WebSocketService {
         e,
         st,
       );
+      _connected = false;
+      _channel = null;
       _connectionController.add(false);
       _scheduleReconnect();
     }
@@ -188,6 +196,20 @@ class WebSocketService {
     _connectionController.add(false);
     _channel?.sink.close();
     _channel = null;
+  }
+
+  /// 立即重连：用于 app 从后台切回前台。移动端被系统冻结后 socket 常已成僵尸
+  /// （`onDone` 未触发，`_connected` 仍为 true），故先强制断开再立刻重连，
+  /// 并复位退避，避免干等退避定时器。
+  void forceReconnect() {
+    _logger.info('event=ws.force_reconnect ${logField('url', _wsUrl)}');
+    _cancelHeartbeat();
+    _cancelReconnect();
+    _backoff = _initialBackoff;
+    _connected = false;
+    _channel?.sink.close();
+    _channel = null;
+    connect();
   }
 
   void _onMessage(dynamic data) {
@@ -283,7 +305,7 @@ class WebSocketService {
     };
     final message = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'hub',
       type: MessageType.hello,
       payload: payload,
@@ -297,7 +319,7 @@ class WebSocketService {
   void sendResume(String nodeId, Map<String, int> cursors) {
     final message = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.resume,
       payload: {
@@ -311,7 +333,7 @@ class WebSocketService {
   void sendPanic(String nodeId, {String? taskId}) {
     final message = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.command,
       payload: {
@@ -352,7 +374,7 @@ class WebSocketService {
 
     final message = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.command,
       payload: payload,
@@ -378,7 +400,7 @@ class WebSocketService {
     payload[ProtocolPayloadKeys.requestId] = const Uuid().v4();
     final msg = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.command,
       payload: payload,
@@ -404,7 +426,7 @@ class WebSocketService {
     payload[ProtocolPayloadKeys.requestId] = const Uuid().v4();
     final msg = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.command,
       payload: payload,
@@ -423,7 +445,7 @@ class WebSocketService {
     }
     final message = MobilePiMessage(
       messageId: messageId,
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.query,
       payload: payload,
@@ -441,7 +463,7 @@ class WebSocketService {
     final messageId = const Uuid().v4();
     final message = MobilePiMessage(
       messageId: messageId,
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.command,
       payload: {
@@ -464,7 +486,7 @@ class WebSocketService {
   }) {
     final message = MobilePiMessage(
       messageId: const Uuid().v4(),
-      from: 'client',
+      from: _clientId,
       to: 'node:$nodeId',
       type: MessageType.query,
       payload: {

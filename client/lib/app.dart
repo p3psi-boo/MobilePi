@@ -56,7 +56,7 @@ class MobilePiApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: _buildTheme(lightColorScheme, Brightness.light),
         darkTheme: _buildTheme(darkColorScheme, Brightness.dark),
-        home: const DashboardScreen(),
+        home: const _AppLifecycleReconnector(child: DashboardScreen()),
       ),
     );
   }
@@ -147,4 +147,41 @@ class MobilePiApp extends StatelessWidget {
       highlightColor: cs.surfaceContainerHighest.withAlpha(50),
     );
   }
+}
+
+/// 监听 app 前后台生命周期：从后台切回前台（resumed）时强制重连 + 差量同步，
+/// 满足 SPEC「切回前台时快速差量同步」的要求，避免干等退避定时器。
+class _AppLifecycleReconnector extends StatefulWidget {
+  const _AppLifecycleReconnector({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_AppLifecycleReconnector> createState() =>
+      _AppLifecycleReconnectorState();
+}
+
+class _AppLifecycleReconnectorState extends State<_AppLifecycleReconnector>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      context.read<NodeProvider>().onAppResumed();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

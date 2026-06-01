@@ -459,6 +459,58 @@ void main() {
       await tempDir.delete(recursive: true);
     },
   );
+
+  test('responses are addressed to the requesting client', () async {
+    final tempDir = await Directory.systemTemp.createTemp(
+      'mobilepi_daemon_reply_target_test_',
+    );
+    final dbPath = p.join(tempDir.path, 'node.db');
+    final port = 21000 + DateTime.now().millisecond;
+    final daemon = NodeDaemon(
+      port: port,
+      dbPath: dbPath,
+      runnerFactory: (_) => FakeAgentRunner(),
+    );
+
+    unawaited(daemon.start());
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+    final events = <MobilePiMessage>[];
+    final sub = ws
+        .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+        .listen(events.add);
+
+    ws.add(
+      jsonEncode(
+        MobilePiMessage(
+          messageId: const Uuid().v4(),
+          from: 'phone-xyz',
+          to: 'node:test',
+          type: MessageType.resume,
+          payload: const {
+            ProtocolPayloadKeys.cursors: <String, dynamic>{},
+            ProtocolPayloadKeys.includeNodeSummary: true,
+          },
+        ).toJson(),
+      ),
+    );
+
+    final response = await _waitFor(
+      events,
+      (m) => m.type == MessageType.response,
+      timeout: const Duration(seconds: 5),
+      label: 'resume response',
+    );
+
+    // 精确路由：回执 to 指向具体请求方 clientId，而非广播哨兵 'client'。
+    expect(response.to, 'phone-xyz');
+
+    await sub.cancel();
+    await ws.close();
+    await daemon.stop();
+    await tempDir.delete(recursive: true);
+  });
 }
 
 class FakeAgentRunner implements AgentRunner {

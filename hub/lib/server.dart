@@ -2,10 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:shelf/shelf.dart';
-import 'package:shelf/shelf_io.dart' as shelf_io;
-import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:logging/logging.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
 
@@ -24,6 +22,20 @@ class HubServer {
   int _peerSeq = 0;
   int _messageSeq = 0;
   Timer? _cleanupTimer;
+
+  /// permessage-deflate 压缩协商（弱网带宽优化）。可用 env
+  /// `MOBILE_PI_WS_COMPRESSION=off` 关闭以便排障；对端不支持时自动回退为不压缩。
+  final CompressionOptions _wsCompression = _resolveCompression();
+
+  static CompressionOptions _resolveCompression() {
+    final raw = Platform.environment['MOBILE_PI_WS_COMPRESSION']
+        ?.trim()
+        .toLowerCase();
+    const disabledValues = {'false', '0', 'off', 'no'};
+    return disabledValues.contains(raw)
+        ? CompressionOptions.compressionOff
+        : CompressionOptions.compressionDefault;
+  }
 
   HubServer({required this.port, required String tenantKey, this.host = '0.0.0.0'})
     : tenantKey = _normalizeTenantKey(tenantKey) {
@@ -48,13 +60,16 @@ class HubServer {
   }
 
   Future<void> start() async {
-    final handler = const Pipeline()
-        .addMiddleware(logRequests())
-        .addHandler(_router);
-
-    _server = await shelf_io.serve(handler, host, port);
+    // 直接使用 dart:io HttpServer（而非 shelf），以便在 WebSocket 升级时
+    // 协商 permessage-deflate 压缩——shelf_web_socket 不暴露该能力。
+    _server = await HttpServer.bind(host, port);
+    _server!.listen(
+      _handleRequest,
+      onError: (Object e, StackTrace st) =>
+          _logger.warning('event=hub.request_error', e, st),
+    );
     _logger.info(
-      'event=hub.started ${logFields({'address': _server!.address.host, 'port': _server!.port, 'wsUrl': wsUrl})}',
+      'event=hub.started ${logFields({'address': _server!.address.host, 'port': _server!.port, 'wsUrl': wsUrl, 'compression': _wsCompression.enabled})}',
     );
     _cleanupTimer = Timer.periodic(const Duration(minutes: 5), (_) {
       _logger.fine('event=hub.periodic_cleanup ${logFields({'clients': _clients.length, 'daemons': _daemons.length, 'summaries': _nodeSummaries.length})}');
@@ -80,24 +95,48 @@ class HubServer {
     _logger.info('event=hub.stopped');
   }
 
-  FutureOr<Response> _router(Request request) {
-    if (request.url.path == 'ws') {
-      return webSocketHandler(_handleSocket)(request);
+  Future<void> _handleRequest(HttpRequest request) async {
+    final path = request.uri.path;
+    if (path == '/ws') {
+      if (!WebSocketTransformer.isUpgradeRequest(request)) {
+        request.response.statusCode = HttpStatus.badRequest;
+        await request.response.close();
+        return;
+      }
+      try {
+        final socket = await WebSocketTransformer.upgrade(
+          request,
+          compression: _wsCompression,
+        );
+        _handleSocket(IOWebSocketChannel(socket));
+      } catch (e, st) {
+        _logger.warning('event=hub.ws_upgrade_failed', e, st);
+      }
+      return;
     }
-    if (request.url.path == 'health' || request.url.path == 'healthz') {
-      return Response.ok(
-        jsonEncode({
-          'status': 'ok',
-          'timestamp': DateTime.now().toUtc().toIso8601String(),
-          'connections': {
-            'clients': _clients.length,
-            'daemons': _daemons.length,
-          },
-        }),
-        headers: {'content-type': 'application/json'},
-      );
+
+    if (path == '/health' || path == '/healthz') {
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(
+          jsonEncode({
+            'status': 'ok',
+            'timestamp': DateTime.now().toUtc().toIso8601String(),
+            'connections': {
+              'clients': _clients.length,
+              'daemons': _daemons.length,
+            },
+          }),
+        );
+      await request.response.close();
+      return;
     }
-    return Response.ok('MobilePi Hub OK - ${DateTime.now().toIso8601String()}');
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..write('MobilePi Hub OK - ${DateTime.now().toIso8601String()}');
+    await request.response.close();
   }
 
   void _handleSocket(WebSocketChannel channel) {

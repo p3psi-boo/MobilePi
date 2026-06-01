@@ -154,31 +154,45 @@ GptMarkdown(
 )
 ```
 
-### Convention: Streaming Structured Markup Must Tolerate Open Blocks
+### Convention: Streaming Rendering Uses Structured Protocol Fields Only
 
-**What**: Chat renderers that parse agent markup such as `<thinking>`,
-`<tool_result>`, or `<skill>` must treat a currently open `<thinking>` block as
-structured thinking content until the closing marker arrives.
+**What**: Client chat renderers must render thinking blocks, tool calls, and
+tool results from structured protocol fields, not by parsing tags in text.
 
-**Why**: Pi emits `thinking_start`, then many `thinking_delta` chunks, then
-`thinking_end`. During streaming, the UI will often rebuild before
-`</thinking>` has arrived. If the parser only recognizes closed tags, the
-in-progress reasoning text is rendered as normal assistant body text.
+**Why**: Pi emits `thinking: "start"`, plain `streamingDelta` chunks, then
+`thinking: "end"`. Tool activity arrives via `toolCall` / `toolResult` payload
+objects. The client can preserve these boundaries as typed state, so regex or
+string matching against `<thinking>`, `<tool_result>`, `[工具: ...]`, or
+`<skill>` is unnecessary and can leak reasoning when a stream is rebuilt
+mid-turn.
 
 **Correct**:
 ```dart
-final normalizedText = text_utils.closeOpenThinkingTag(text);
-final parts = _MessagePartsParser.parse(normalizedText);
+final nextParts = appendStreamingDelta(
+  existingParts,
+  delta,
+  isThinking: task.isThinking,
+);
+return _buildHistoryPartWidgets(context, task.streamingParts);
 ```
 
 **Wrong**:
 ```dart
-final parts = closedTagRegex.allMatches(streamingText);
+final parts = tagRegex.allMatches(streamingText);
+final preview = stripTags(message.text);
 ```
 
-**Tests Required**: Add a regression test for unfinished `<thinking>` markup in
-the text helper or parser layer, and keep `stripTags` consistent so previews do
-not leak partial thinking content.
+**Payload Contract**:
+- `streamingDelta`: plain text only; no structural marker injection.
+- `thinking`: `"start"` / `"end"` boundary that controls whether subsequent
+  deltas append to a `MessagePart.thinking` or `MessagePart.text`.
+- `toolCall` / `toolResult`: structured tool event objects rendered as tool UI,
+  never inferred from text.
+
+**Tests Required**: Provider tests for streaming must assert that a
+`thinking: "start"` event followed by deltas creates `MessagePart.thinking`,
+that `thinking: "end"` switches subsequent deltas back to `MessagePart.text`,
+and that render code does not use tag parsers or text stripping helpers.
 
 ---
 

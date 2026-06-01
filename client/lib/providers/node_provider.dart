@@ -13,6 +13,7 @@ import '../services/websocket_service.dart';
 const String _kHubUrlPrefKey = 'mobilepi.hubUrl';
 const String _kTenantKeyPrefKey = 'mobilepi.tenantKey';
 const String _kCursorPrefKey = 'mobilepi.cursors';
+const int _kMaxStreamingTextLength = 24000;
 
 /// 任务运行时状态
 /// A structured tool call recorded during streaming.
@@ -23,12 +24,10 @@ class StreamingToolEvent {
   final bool isError;
   final String? resultText;
 
-  const StreamingToolEvent.call({
-    required this.name,
-    this.id,
-  }) : isResult = false,
-       isError = false,
-       resultText = null;
+  const StreamingToolEvent.call({required this.name, this.id})
+    : isResult = false,
+      isError = false,
+      resultText = null;
 
   const StreamingToolEvent.result({
     required this.name,
@@ -51,6 +50,11 @@ class TaskState {
   final String title;
   final String status; // idle|running|waitingDecision|error|completed|history
   final String? streamingText;
+
+  /// Structured streaming text segments derived from protocol fields.
+  /// Rendering must use this instead of parsing tags out of [streamingText].
+  final List<MessagePart> streamingParts;
+
   final List<PiSessionMessageInfo> messages;
   final int? progressPercent;
   final int? linesAdded;
@@ -83,6 +87,7 @@ class TaskState {
     required this.title,
     this.status = 'idle',
     this.streamingText,
+    this.streamingParts = const [],
     this.messages = const [],
     this.progressPercent,
     this.linesAdded,
@@ -104,6 +109,7 @@ class TaskState {
     String? piInstanceId,
     String? model,
     String? streamingText,
+    List<MessagePart>? streamingParts,
     List<PiSessionMessageInfo>? messages,
     int? progressPercent,
     int? linesAdded,
@@ -127,6 +133,7 @@ class TaskState {
       title: title,
       status: status ?? this.status,
       streamingText: streamingText ?? this.streamingText,
+      streamingParts: streamingParts ?? this.streamingParts,
       messages: messages ?? this.messages,
       progressPercent: progressPercent ?? this.progressPercent,
       linesAdded: linesAdded ?? this.linesAdded,
@@ -139,6 +146,33 @@ class TaskState {
       createdAt: createdAt,
     );
   }
+
+  String get displayTitle {
+    final userPreview = _firstMessagePreview(
+      messages.where((message) => message.role == 'user'),
+    );
+    if (userPreview.isNotEmpty) return _singleLineTitle(userPreview);
+
+    final messagePreview = _firstMessagePreview(messages);
+    if (messagePreview.isNotEmpty) return _singleLineTitle(messagePreview);
+
+    return _singleLineTitle(title);
+  }
+}
+
+String _firstMessagePreview(Iterable<PiSessionMessageInfo> messages) {
+  for (final message in messages) {
+    final preview = message.structuredPreviewText;
+    if (preview.isNotEmpty) return preview;
+  }
+  return '';
+}
+
+String _singleLineTitle(String text) {
+  final singleLine = text.replaceAll('\n', ' ').trim();
+  return singleLine.length > 80
+      ? '${singleLine.substring(0, 80)}...'
+      : singleLine;
 }
 
 /// Result of a remote directory listing.
@@ -348,6 +382,14 @@ class NodeProvider extends ChangeNotifier {
     }
   }
 
+  /// app 从后台切回前台时调用：强制重连 + 差量同步，确保进度连续性。
+  /// 即便 `_ws.isConnected` 仍为 true，移动端冻结后的 socket 也可能是僵尸，
+  /// 故走 forceReconnect 重建连接（重连成功后 _onConnectionChanged 会 resume）。
+  void onAppResumed() {
+    if (!hasTenantKey) return;
+    _ws.forceReconnect();
+  }
+
   void _onConnectionChanged(bool connected) {
     _connecting = false;
     if (connected) {
@@ -424,8 +466,7 @@ class NodeProvider extends ChangeNotifier {
     final nodeId =
         payload[ProtocolPayloadKeys.nodeId] as String? ??
         _normalizeNodeId(from);
-    final hostname =
-        payload[ProtocolPayloadKeys.hostname] as String? ?? nodeId;
+    final hostname = payload[ProtocolPayloadKeys.hostname] as String? ?? nodeId;
     final platform = payload[ProtocolPayloadKeys.platform] as String? ?? '';
     final agents =
         (payload[ProtocolPayloadKeys.agents] as List<dynamic>?)
@@ -698,15 +739,26 @@ class NodeProvider extends ChangeNotifier {
     bool? isThinking;
     if (thinkingRaw == 'start') isThinking = true;
     if (thinkingRaw == 'end') isThinking = false;
+    if (status != 'running' && thinkingRaw == null) isThinking = false;
 
     // Pure text delta
     String? nextStreamingText = streamingText;
     if (nextStreamingText == null && streamingDelta != null) {
       nextStreamingText = '${existing?.streamingText ?? ''}$streamingDelta';
     }
-    if (nextStreamingText != null && nextStreamingText.length > 24000) {
-      nextStreamingText = nextStreamingText.substring(nextStreamingText.length - 24000);
+    if (nextStreamingText != null &&
+        nextStreamingText.length > _kMaxStreamingTextLength) {
+      nextStreamingText = nextStreamingText.substring(
+        nextStreamingText.length - _kMaxStreamingTextLength,
+      );
     }
+
+    final nextStreamingParts = _structuredStreamingParts(
+      existing: existing,
+      streamingText: streamingText,
+      streamingDelta: streamingDelta,
+      isThinking: isThinking ?? existing?.isThinking ?? false,
+    );
 
     if (existing != null) {
       _tasks[taskId] = existing.copyWith(
@@ -714,6 +766,7 @@ class NodeProvider extends ChangeNotifier {
         piInstanceId: piInstanceId,
         model: model,
         streamingText: nextStreamingText,
+        streamingParts: nextStreamingParts,
         messages: messages,
         progressPercent: progressPercent,
         linesAdded: linesAdded,
@@ -734,6 +787,7 @@ class NodeProvider extends ChangeNotifier {
         title: payload[ProtocolPayloadKeys.title]?.toString() ?? '任务 $taskId',
         status: status,
         streamingText: nextStreamingText,
+        streamingParts: nextStreamingParts ?? const [],
         messages: messages ?? const [],
         progressPercent: progressPercent,
         linesAdded: linesAdded,
@@ -751,6 +805,75 @@ class NodeProvider extends ChangeNotifier {
       _notifyNow();
     }
     _pruneOldTasks();
+  }
+
+  List<MessagePart>? _structuredStreamingParts({
+    required TaskState? existing,
+    required String? streamingText,
+    required String? streamingDelta,
+    required bool isThinking,
+  }) {
+    if (streamingText == null && streamingDelta == null) return null;
+
+    if (streamingText != null) {
+      final part = isThinking
+          ? MessagePart.thinking(streamingText)
+          : MessagePart.text(streamingText);
+      return _trimStreamingParts([part]);
+    }
+
+    final delta = streamingDelta;
+    if (delta == null || delta.isEmpty) {
+      return existing?.streamingParts ?? const [];
+    }
+
+    final parts = List<MessagePart>.from(existing?.streamingParts ?? const []);
+    if (parts.isEmpty || parts.last.type != _streamingPartType(isThinking)) {
+      parts.add(
+        isThinking ? MessagePart.thinking(delta) : MessagePart.text(delta),
+      );
+    } else {
+      final last = parts.removeLast();
+      final text = '${last.text ?? ''}$delta';
+      parts.add(
+        isThinking ? MessagePart.thinking(text) : MessagePart.text(text),
+      );
+    }
+    return _trimStreamingParts(parts);
+  }
+
+  MessagePartType _streamingPartType(bool isThinking) {
+    return isThinking ? MessagePartType.thinking : MessagePartType.text;
+  }
+
+  List<MessagePart> _trimStreamingParts(List<MessagePart> parts) {
+    var remaining = _kMaxStreamingTextLength;
+    final kept = <MessagePart>[];
+
+    for (final part in parts.reversed) {
+      final text = part.text ?? '';
+      if (text.isEmpty) continue;
+      if (text.length <= remaining) {
+        kept.add(part);
+        remaining -= text.length;
+        continue;
+      }
+      if (remaining > 0) {
+        kept.add(
+          _copyPartWithText(part, text.substring(text.length - remaining)),
+        );
+      }
+      break;
+    }
+
+    return kept.reversed.toList();
+  }
+
+  MessagePart _copyPartWithText(MessagePart part, String text) {
+    return switch (part.type) {
+      MessagePartType.thinking => MessagePart.thinking(text),
+      _ => MessagePart.text(text),
+    };
   }
 
   void _handleSessionMessagesResponse(Map<String, dynamic> payload) {

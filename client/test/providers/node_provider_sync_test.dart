@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobilepi_client/models/node_state.dart';
 import 'package:mobilepi_client/providers/node_provider.dart';
 import 'package:mobilepi_client/services/websocket_service.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
@@ -186,6 +187,56 @@ void main() {
 
       provider.dispose();
     });
+
+    test(
+      'builds streaming parts from structured thinking boundaries',
+      () async {
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(webSocketService: ws);
+
+        emitThinkingBoundary(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 1,
+          boundary: 'start',
+        );
+        emitTaskDelta(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 2,
+          delta: 'reasoning',
+        );
+        emitThinkingBoundary(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 3,
+          boundary: 'end',
+        );
+        emitTaskDelta(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 4,
+          delta: '\nfinal answer',
+        );
+
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+
+        final task = provider.getTask('task-1');
+        expect(task?.streamingText, equals('reasoning\nfinal answer'));
+        expect(task?.isThinking, isFalse);
+        expect(task?.streamingParts, hasLength(2));
+        expect(task?.streamingParts[0].type, MessagePartType.thinking);
+        expect(task?.streamingParts[0].text, 'reasoning');
+        expect(task?.streamingParts[1].type, MessagePartType.text);
+        expect(task?.streamingParts[1].text, '\nfinal answer');
+
+        provider.dispose();
+      },
+    );
 
     test('connects to the configured Hub URL without daemon editing', () async {
       final ws = FakeWebSocketService();
@@ -420,6 +471,35 @@ void emitTaskDelta(
           'taskId': taskId,
           'status': 'running',
           'streamingDelta': delta,
+        },
+        ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      timestamp: DateTime.utc(2026, 1, 1),
+    ),
+  );
+}
+
+void emitThinkingBoundary(
+  FakeWebSocketService ws, {
+  required String nodeId,
+  required String taskId,
+  required int seq,
+  required String boundary,
+}) {
+  ws.emitMessage(
+    MobilePiMessage(
+      messageId: 'event-$seq-thinking-$boundary',
+      from: 'node:$nodeId',
+      to: 'client',
+      type: MessageType.event,
+      payload: {
+        ProtocolPayloadKeys.streamId: 'task:$taskId',
+        ProtocolPayloadKeys.seq: seq,
+        ProtocolPayloadKeys.eventType: 'task.output.delta',
+        ProtocolPayloadKeys.eventPayload: {
+          'taskId': taskId,
+          'status': 'running',
+          ProtocolPayloadKeys.thinking: boundary,
         },
         ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:00.000Z',
       },

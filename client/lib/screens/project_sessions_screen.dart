@@ -54,8 +54,7 @@ class ProjectSessionsScreen extends StatelessWidget {
         backgroundColor: cs.primary,
         foregroundColor: cs.onPrimary,
         elevation: 4,
-        label: const Text('新会话',
-            style: TextStyle(fontWeight: FontWeight.w600)),
+        label: const Text('新会话', style: TextStyle(fontWeight: FontWeight.w600)),
         icon: const Icon(Icons.add_rounded),
       ),
       body: Column(
@@ -141,8 +140,10 @@ class ProjectSessionsScreen extends StatelessWidget {
     // Sort all sessions by modified DESC so latest appears first at each level
     final sorted = List<PiSessionInfo>.from(sessions)
       ..sort((a, b) {
-        final aTime = a.modified ?? a.created ?? DateTime.fromMillisecondsSinceEpoch(0);
-        final bTime = b.modified ?? b.created ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final aTime =
+            a.modified ?? a.created ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final bTime =
+            b.modified ?? b.created ?? DateTime.fromMillisecondsSinceEpoch(0);
         return bTime.compareTo(aTime);
       });
 
@@ -162,8 +163,11 @@ class ProjectSessionsScreen extends StatelessWidget {
     }
 
     // Recursively build tree nodes
-    List<_SessionTreeNode> buildNodes(List<PiSessionInfo> level,
-        Set<String> seen, String? parentPath) {
+    List<_SessionTreeNode> buildNodes(
+      List<PiSessionInfo> level,
+      Set<String> seen,
+      String? parentPath,
+    ) {
       final nodes = <_SessionTreeNode>[];
       for (final s in level) {
         if (seen.contains(s.path)) continue;
@@ -180,10 +184,12 @@ class ProjectSessionsScreen extends StatelessWidget {
         }
         seen.add(s.path);
         final childSessions = childrenByParent[s.path] ?? const [];
-        nodes.add(_SessionTreeNode(
-          session: s,
-          children: buildNodes(childSessions, seen, s.path),
-        ));
+        nodes.add(
+          _SessionTreeNode(
+            session: s,
+            children: buildNodes(childSessions, seen, s.path),
+          ),
+        );
       }
       return nodes;
     }
@@ -282,12 +288,7 @@ class _SessionTreeViewState extends State<_SessionTreeView> {
       );
 
       if (hasChildren && expanded) {
-        _buildList(
-          out,
-          node.children,
-          depth + 1,
-          [...lastAtDepth, isLast],
-        );
+        _buildList(out, node.children, depth + 1, [...lastAtDepth, isLast]);
       }
     }
   }
@@ -340,7 +341,12 @@ class _SessionTile extends StatelessWidget {
                   branchChar,
                   style: TextStyle(
                     fontFamily: 'monospace',
-                    fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                    fontFamilyFallback: const [
+                      'Courier New',
+                      'PingFang SC',
+                      'Microsoft YaHei',
+                      'sans-serif',
+                    ],
                     fontSize: 12,
                     color: dimColor,
                     height: 1.3,
@@ -356,7 +362,12 @@ class _SessionTile extends StatelessWidget {
         connector,
         style: TextStyle(
           fontFamily: 'monospace',
-          fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+          fontFamilyFallback: const [
+            'Courier New',
+            'PingFang SC',
+            'Microsoft YaHei',
+            'sans-serif',
+          ],
           fontSize: 12,
           color: dimColor,
           height: 1.3,
@@ -384,10 +395,7 @@ class _SessionTile extends StatelessWidget {
               children: [
                 // Tree connectors
                 if (depth > 0 || hasChildren)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: leading,
-                  ),
+                  Row(mainAxisSize: MainAxisSize.min, children: leading),
                 // Expand/collapse toggle for branches
                 if (hasChildren)
                   GestureDetector(
@@ -422,7 +430,8 @@ class _SessionTile extends StatelessWidget {
                   width: 30,
                   height: 30,
                   decoration: BoxDecoration(
-                    color: session.parentSessionPath != null &&
+                    color:
+                        session.parentSessionPath != null &&
                             session.parentSessionPath!.isNotEmpty
                         ? cs.tertiary.withValues(alpha: 0.12)
                         : cs.secondary.withValues(alpha: 0.10),
@@ -435,7 +444,8 @@ class _SessionTile extends StatelessWidget {
                         ? Icons.call_split_rounded
                         : Icons.chat_bubble_rounded,
                     size: 14,
-                    color: session.parentSessionPath != null &&
+                    color:
+                        session.parentSessionPath != null &&
                             session.parentSessionPath!.isNotEmpty
                         ? cs.tertiary
                         : cs.secondary,
@@ -448,7 +458,7 @@ class _SessionTile extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        stripTags(session.displayTitle),
+                        session.displayTitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.bodySmall?.copyWith(

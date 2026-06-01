@@ -142,6 +142,12 @@ class PiSessionInfo {
   String get displayTitle {
     final title = name?.trim();
     if (title != null && title.isNotEmpty) return title;
+    final firstUserMessage = _firstStructuredPreview(
+      messages.where((message) => message.role == 'user'),
+    );
+    if (firstUserMessage.isNotEmpty) return firstUserMessage;
+    final firstMessageText = _firstStructuredPreview(messages);
+    if (firstMessageText.isNotEmpty) return firstMessageText;
     final first = firstMessage.trim();
     if (first.isNotEmpty && first != '(no messages)') return first;
     return 'Pi session ${id.length <= 8 ? id : id.substring(0, 8)}';
@@ -188,10 +194,10 @@ class MessagePart {
       'thinking' => MessagePart.thinking(json['text']?.toString()),
       'toolCall' => MessagePart.toolCall(json['name']?.toString()),
       'toolResult' => MessagePart.toolResult(
-          name: json['name']?.toString(),
-          status: json['status']?.toString(),
-          text: json['text']?.toString(),
-        ),
+        name: json['name']?.toString(),
+        status: json['status']?.toString(),
+        text: json['text']?.toString(),
+      ),
       _ => MessagePart.text(json['text']?.toString()),
     };
   }
@@ -218,6 +224,7 @@ class PiSessionMessageInfo {
   final DateTime? timestamp;
   final String? model;
   final UsageInfo? usage;
+
   /// Structured content blocks — the authoritative data source for rendering.
   /// When non-empty, clients should use these instead of regex-parsing [text].
   final List<MessagePart> parts;
@@ -240,12 +247,24 @@ class PiSessionMessageInfo {
       usage: json['usage'] is Map
           ? UsageInfo.fromJson(Map<String, dynamic>.from(json['usage'] as Map))
           : null,
-      parts: (json['parts'] as List<dynamic>?)
+      parts:
+          (json['parts'] as List<dynamic>?)
               ?.whereType<Map>()
               .map((e) => MessagePart.fromJson(Map<String, dynamic>.from(e)))
               .toList() ??
           const [],
     );
+  }
+
+  String get structuredPreviewText {
+    final textParts = parts
+        .where((part) => part.type == MessagePartType.text)
+        .map((part) => part.text?.trim() ?? '')
+        .where((text) => text.isNotEmpty)
+        .join('\n\n')
+        .trim();
+    if (textParts.isNotEmpty) return textParts;
+    return text.trim();
   }
 
   String get displayText {
@@ -257,6 +276,14 @@ class PiSessionMessageInfo {
     };
     return '$label:\n$text';
   }
+}
+
+String _firstStructuredPreview(Iterable<PiSessionMessageInfo> messages) {
+  for (final message in messages) {
+    final preview = message.structuredPreviewText;
+    if (preview.isNotEmpty) return preview;
+  }
+  return '';
 }
 
 class NodeState {

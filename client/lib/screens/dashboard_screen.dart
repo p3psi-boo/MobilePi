@@ -61,9 +61,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: CustomScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
-              SliverToBoxAdapter(
-                child: _TopBar(onRefresh: _onRefresh),
-              ),
+              SliverToBoxAdapter(child: _TopBar(onRefresh: _onRefresh)),
               const SliverToBoxAdapter(child: _GreetingHero()),
               const SliverToBoxAdapter(child: SizedBox(height: 12)),
               const SliverToBoxAdapter(child: _NodeCarouselSection()),
@@ -216,10 +214,7 @@ class _AppDrawer extends StatelessWidget {
                 ],
               ),
             ),
-            Divider(
-              height: 1,
-              color: cs.outlineVariant.withValues(alpha: 0.4),
-            ),
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.4)),
             const SizedBox(height: 8),
             _DrawerItem(
               icon: Icons.view_kanban_rounded,
@@ -269,7 +264,7 @@ class _AppDrawer extends StatelessWidget {
 
   void _handleGrillMe(BuildContext context) {
     Navigator.of(context).pop(); // 关闭 drawer
-    
+
     final provider = context.read<NodeProvider>();
     final onlineNodes = provider.nodes.where((n) => n.online).toList();
     if (onlineNodes.isEmpty) {
@@ -288,7 +283,7 @@ class _AppDrawer extends StatelessWidget {
       );
       return;
     }
-    
+
     final targetNode = onlineNodes.first;
     showDialog(
       context: context,
@@ -633,9 +628,8 @@ class _RecentTaskCard extends StatelessWidget {
       (p) => p.getNode(task.nodeId),
     );
     final nodeName =
-        node?.hostname ?? (task.nodeId.length > 8
-            ? task.nodeId.substring(0, 8)
-            : task.nodeId);
+        node?.hostname ??
+        (task.nodeId.length > 8 ? task.nodeId.substring(0, 8) : task.nodeId);
 
     final statusColor = switch (task.status) {
       'running' => const Color(0xFF4ADE80),
@@ -659,9 +653,7 @@ class _RecentTaskCard extends StatelessWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(18),
         onTap: () => Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => TaskDetailScreen(taskId: task.id),
-          ),
+          MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: task.id)),
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
@@ -688,7 +680,7 @@ class _RecentTaskCard extends StatelessWidget {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      stripTags(task.title),
+                      task.displayTitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.titleSmall?.copyWith(
@@ -777,7 +769,7 @@ class _RecentTaskCard extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('确认终止'),
-        content: Text('确定要强制终止任务「${stripTags(task.title)}」吗？'),
+        content: Text('确定要强制终止任务「${task.displayTitle}」吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),

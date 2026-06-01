@@ -46,9 +46,7 @@ class PiMarkdown extends StatelessWidget {
     // 基础正文样式 — 低对比度，柔和行高
     final baseStyle =
         style ??
-        (dense
-                ? theme.textTheme.bodySmall
-                : theme.textTheme.bodyMedium)
+        (dense ? theme.textTheme.bodySmall : theme.textTheme.bodyMedium)
             ?.copyWith(
               color: cs.onSurface.withValues(alpha: 0.72),
               height: dense ? 1.5 : 1.6,
@@ -62,8 +60,8 @@ class PiMarkdown extends StatelessWidget {
     final inlineCodeColor = inverted
         ? baseColor
         : (isDark
-            ? cs.tertiary.withValues(alpha: 0.95)
-            : cs.tertiary.withValues(alpha: 0.85));
+              ? cs.tertiary.withValues(alpha: 0.95)
+              : cs.tertiary.withValues(alpha: 0.85));
 
     // 内联 code 的极淡背景 — 对应 pi-tui 没有背景，但 Flutter 平台习惯加个浅底
     final inlineCodeBg = inverted
@@ -102,7 +100,12 @@ class PiMarkdown extends StatelessWidget {
               content,
               style: textStyle.copyWith(
                 fontFamily: 'monospace',
-                fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                fontFamilyFallback: const [
+                  'Courier New',
+                  'PingFang SC',
+                  'Microsoft YaHei',
+                  'sans-serif',
+                ],
                 color: inlineCodeColor,
                 fontSize: fontSize * 0.92,
                 height: 1.3,
@@ -112,10 +115,11 @@ class PiMarkdown extends StatelessWidget {
         },
         codeBuilder: (context, name, code, closed) {
           // 去掉末尾多余换行，避免代码块底部出现额外空白行
-          final trimmed = code.replaceAll(RegExp(r'\n+$'), '');
+          final trimmed = _trimTrailingNewlines(code);
           // 终端风格宽度：80 列等宽，手机屏幕外可以左右滑动。
           // 这样 Agent 输出的 ASCII 图表不会因为换行而变形。
-          final charWidth = fontSize * 0.92 * 0.6; // approximate monospace char width
+          final charWidth =
+              fontSize * 0.92 * 0.6; // approximate monospace char width
           final terminalWidth = 80 * charWidth;
           final scrollableChild = Container(
             constraints: BoxConstraints(minWidth: terminalWidth),
@@ -146,7 +150,12 @@ class PiMarkdown extends StatelessWidget {
                             style: theme.textTheme.labelSmall?.copyWith(
                               color: codeBlockLangColor,
                               fontFamily: 'monospace',
-                              fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                              fontFamilyFallback: const [
+                                'Courier New',
+                                'PingFang SC',
+                                'Microsoft YaHei',
+                                'sans-serif',
+                              ],
                               fontSize: 10,
                               letterSpacing: 0.4,
                             ),
@@ -155,9 +164,8 @@ class PiMarkdown extends StatelessWidget {
                         if (!inverted)
                           InkWell(
                             borderRadius: BorderRadius.circular(4),
-                            onTap: () => Clipboard.setData(
-                              ClipboardData(text: trimmed),
-                            ),
+                            onTap: () =>
+                                Clipboard.setData(ClipboardData(text: trimmed)),
                             child: Padding(
                               padding: const EdgeInsets.all(4),
                               child: Icon(
@@ -177,7 +185,12 @@ class PiMarkdown extends StatelessWidget {
                       trimmed,
                       style: (baseStyle ?? const TextStyle()).copyWith(
                         fontFamily: 'monospace',
-                        fontFamilyFallback: const ['Courier New', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                        fontFamilyFallback: const [
+                          'Courier New',
+                          'PingFang SC',
+                          'Microsoft YaHei',
+                          'sans-serif',
+                        ],
                         fontSize: fontSize * 0.92,
                         color: codeBlockTextColor,
                         height: 1.45,
@@ -196,4 +209,12 @@ class PiMarkdown extends StatelessWidget {
       ),
     );
   }
+}
+
+String _trimTrailingNewlines(String text) {
+  var end = text.length;
+  while (end > 0 && text.codeUnitAt(end - 1) == 10) {
+    end--;
+  }
+  return end == text.length ? text : text.substring(0, end);
 }

@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 
 import '../models/node_state.dart';
 import '../providers/node_provider.dart';
-import '../utils/text.dart' as text_utils;
 import '../widgets/pi_markdown.dart';
 import '../widgets/task_status_bar.dart';
 
@@ -48,10 +47,6 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     }
     _inputController.clear();
   }
-
-  /// 剥离 `&lt;skill&gt;`, `&lt;thinking&gt;`, `&lt;tool_result&gt;` 等结构化标签
-  /// （走带缓存的全局工具）
-  static String _stripTags(String text) => text_utils.stripTags(text);
 
   @override
   Widget build(BuildContext context) {
@@ -100,16 +95,12 @@ class _TaskAppBar extends StatelessWidget {
     return Selector<NodeProvider, (String, bool, TaskState?)>(
       selector: (ctx, p) {
         final t = p.getTask(taskId);
-        return (t?.title ?? '', t?.status == 'running', t);
+        return (t?.displayTitle ?? '', t?.status == 'running', t);
       },
       builder: (ctx, data, _) {
         final (title, isRunning, task) = data;
         return AppBar(
-          title: Text(
-            _TaskDetailScreenState._stripTags(title),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
           centerTitle: true,
           actions: [
             if (isRunning && task != null)
@@ -232,7 +223,6 @@ class _OutputView extends StatefulWidget {
 }
 
 class _OutputViewState extends State<_OutputView> {
-
   final ScrollController _scrollController = ScrollController();
   int _lastMessageCount = 0;
   String _lastStreamingText = '';
@@ -253,6 +243,7 @@ class _OutputViewState extends State<_OutputView> {
   /// manually expanded.  The latest turn is always expanded; this set
   /// tracks additional user-expanded turns.
   final _expandedTurnKeys = <int>{};
+
   /// Incremented whenever _expandedTurnKeys changes, used to trigger
   /// Selector rebuilds when the user toggles a turn.
   int _collapseVersion = 0;
@@ -444,313 +435,342 @@ class _OutputViewState extends State<_OutputView> {
     return Stack(
       children: [
         CustomScrollView(
-      controller: _scrollController,
-      slivers: [
-        // Loading indicator while fetching.
-        if (_isLoadingMore)
-          const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.only(top: 16, bottom: 8),
-              child: Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            ),
-          ),
-        // History divider — clickable row to load more.
-        // Show whenever more messages exist, even before any history loads.
-        if (!_isLoadingMore && _hasMore)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.only(top: 12, bottom: 8),
-              child: Center(
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(14),
-                  onTap: _loadEarlier,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
-                    ),
-                    child: Text(
-                      _previousCount > 0
-                          ? '$_previousCount earlier messages'
-                          : 'Load earlier messages',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: cs.onSurfaceVariant.withValues(alpha: 0.5),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        SliverPadding(
-          padding: const EdgeInsets.all(16),
-          sliver: Selector<NodeProvider, (List<PiSessionMessageInfo>, String?, int)>(
-            selector: (ctx, p) {
-              final task = p.getTask(widget.taskId);
-              // task-level fallback model（用于没有 per-message model 的情况）
-              String? fallbackModel = task?.model;
-              if (fallbackModel == null || fallbackModel.isEmpty) {
-                final node = p.getNode(task?.nodeId ?? '');
-                fallbackModel = node?.piDefaultModel;
-              }
-              return (task?.messages ?? const [], fallbackModel, _collapseVersion);
-            },
-            shouldRebuild: (prev, next) =>
-                prev.$1.length != next.$1.length || prev.$2 != next.$2 || prev.$3 != next.$3,
-            builder: (context, data, _) {
-              final (messages, fallbackModel, collapseVer) = data;
-              if (messages.isEmpty) {
-                return const SliverToBoxAdapter(child: SizedBox.shrink());
-              }
-              return SliverList(
-                delegate: SliverChildBuilderDelegate((context, idx) {
-                  final msg = messages[idx];
-
-                  // Skip non-start indices within a non-user group.
-                  if (idx > 0 && msg.role != 'user' && messages[idx - 1].role != 'user') {
-                    return const SizedBox.shrink();
-                  }
-
-                  final isUser = msg.role == 'user';
-                  if (isUser) {
-                    return _MessageItem(
-                      key: ValueKey('msg_$idx'),
-                      message: msg,
-                      isUser: true,
-                      isFinal: true,
-                    );
-                  }
-
-                  // Collect consecutive non-user messages into a group.
-                  int end = idx;
-                  while (end < messages.length && messages[end].role != 'user') {
-                    end++;
-                  }
-                  final group = messages.sublist(idx, end);
-                  final turnKey = 'turn_$idx';
-
-                  // Find the index of the LAST non-user group.
-                  int lastNonUserIdx = -1;
-                  for (int i = messages.length - 1; i >= 0; i--) {
-                    if (messages[i].role != 'user') {
-                      while (i > 0 && messages[i - 1].role != 'user') { i--; }
-                      lastNonUserIdx = i;
-                      break;
-                    }
-                  }
-
-                  final isLatest = idx == lastNonUserIdx;
-                  final isExpanded = isLatest || _expandedTurnKeys.contains(idx);
-
-                  if (isExpanded) {
-                    return _AgentTurnWidget(
-                      key: ValueKey(turnKey),
-                      messages: group,
-                      modelName: msg.model ?? fallbackModel,
-                    );
-                  }
-
-                  return _CollapsedTurnRow(
-                    key: ValueKey('collapsed_$idx'),
-                    turnKey: turnKey,
-                    messages: group,
-                    modelName: msg.model ?? fallbackModel,
-                    onExpand: () => setState(() {
-                      _expandedTurnKeys.add(idx);
-                      _collapseVersion++;
-                      _shouldStickToBottom = false;
-                    }),
-                  );
-                }, childCount: messages.length),
-              );
-            },
-          ),
-        ),
-        SliverPadding(
-          padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
-          sliver: Selector<NodeProvider, (String?, bool, List<StreamingToolEvent>, bool, String?)>(
-            selector: (ctx, p) {
-              final t = p.getTask(widget.taskId);
-              return (
-                t?.streamingText,
-                t?.status == 'running',
-                t?.toolEvents ?? const [],
-                t?.isThinking ?? false,
-                t?.statusLabel,
-              );
-            },
-            builder: (context, data, _) {
-              final streamingText = data.$1;
-              final isRunning = data.$2;
-              final toolEvents = data.$3;
-              final isThinking = data.$4;
-              final statusLabel = data.$5;
-              final hasContent = streamingText != null && streamingText.isNotEmpty ||
-                  toolEvents.isNotEmpty || statusLabel != null;
-              if (!hasContent) {
-                if (isRunning && _lastMessageCount == 0) {
-                  return const SliverToBoxAdapter(
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircularProgressIndicator(),
-                          SizedBox(height: 8),
-                          Text(
-                            '等待 Agent 输出...',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                } else if (!isRunning && _lastMessageCount == 0) {
-                  return const SliverToBoxAdapter(
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.chat_bubble_outline,
-                            size: 48,
-                            color: Colors.grey,
-                          ),
-                          SizedBox(height: 8),
-                          Text('暂无输出', style: TextStyle(color: Colors.grey)),
-                        ],
-                      ),
-                    ),
-                  );
-                }
-                return const SliverToBoxAdapter(child: SizedBox.shrink());
-              }
-
-              return SliverToBoxAdapter(
+          controller: _scrollController,
+          slivers: [
+            // Loading indicator while fetching.
+            if (_isLoadingMore)
+              const SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (streamingText != null &&
-                          streamingText.length > _maxRenderedStreamingChars)
-                        _OutputTruncationNotice(
-                          omittedChars:
-                              streamingText.length - _maxRenderedStreamingChars,
-                        ),
-                      // Markdown text (pure — no structural tags)
-                      if (streamingText != null && streamingText.isNotEmpty)
-                        ..._buildStreamingTextWidgets(
-                          context,
-                          streamingText,
-                          isThinking: isThinking,
-                          isFinal: !isRunning,
-                        ),
-                      // Structured tool events
-                      if (toolEvents.isNotEmpty)
-                        _buildStreamingToolChips(
-                          context,
-                          toolEvents,
-                          isFinal: !isRunning,
-                        ),
-                      // Status label (compaction, retry, etc.)
-                      if (statusLabel != null)
-                        _StatusLabel(label: statusLabel),
-                    ],
+                  padding: EdgeInsets.only(top: 16, bottom: 8),
+                  child: Center(
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
                   ),
                 ),
-              );
-            },
-          ),
+              ),
+            // History divider — clickable row to load more.
+            // Show whenever more messages exist, even before any history loads.
+            if (!_isLoadingMore && _hasMore)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12, bottom: 8),
+                  child: Center(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: _loadEarlier,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          color: cs.surfaceContainerHighest.withValues(
+                            alpha: 0.55,
+                          ),
+                        ),
+                        child: Text(
+                          _previousCount > 0
+                              ? '$_previousCount earlier messages'
+                              : 'Load earlier messages',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            SliverPadding(
+              padding: const EdgeInsets.all(16),
+              sliver:
+                  Selector<
+                    NodeProvider,
+                    (List<PiSessionMessageInfo>, String?, int)
+                  >(
+                    selector: (ctx, p) {
+                      final task = p.getTask(widget.taskId);
+                      // task-level fallback model（用于没有 per-message model 的情况）
+                      String? fallbackModel = task?.model;
+                      if (fallbackModel == null || fallbackModel.isEmpty) {
+                        final node = p.getNode(task?.nodeId ?? '');
+                        fallbackModel = node?.piDefaultModel;
+                      }
+                      return (
+                        task?.messages ?? const [],
+                        fallbackModel,
+                        _collapseVersion,
+                      );
+                    },
+                    shouldRebuild: (prev, next) =>
+                        prev.$1.length != next.$1.length ||
+                        prev.$2 != next.$2 ||
+                        prev.$3 != next.$3,
+                    builder: (context, data, _) {
+                      final (messages, fallbackModel, collapseVer) = data;
+                      if (messages.isEmpty) {
+                        return const SliverToBoxAdapter(
+                          child: SizedBox.shrink(),
+                        );
+                      }
+                      return SliverList(
+                        delegate: SliverChildBuilderDelegate((context, idx) {
+                          final msg = messages[idx];
+
+                          // Skip non-start indices within a non-user group.
+                          if (idx > 0 &&
+                              msg.role != 'user' &&
+                              messages[idx - 1].role != 'user') {
+                            return const SizedBox.shrink();
+                          }
+
+                          final isUser = msg.role == 'user';
+                          if (isUser) {
+                            return _MessageItem(
+                              key: ValueKey('msg_$idx'),
+                              message: msg,
+                              isUser: true,
+                              isFinal: true,
+                              modelName: fallbackModel,
+                              showHeader: true,
+                            );
+                          }
+
+                          // Collect consecutive non-user messages into a group.
+                          int end = idx;
+                          while (end < messages.length &&
+                              messages[end].role != 'user') {
+                            end++;
+                          }
+                          final group = messages.sublist(idx, end);
+                          final turnKey = 'turn_$idx';
+
+                          // Find the index of the LAST non-user group.
+                          int lastNonUserIdx = -1;
+                          for (int i = messages.length - 1; i >= 0; i--) {
+                            if (messages[i].role != 'user') {
+                              while (i > 0 && messages[i - 1].role != 'user') {
+                                i--;
+                              }
+                              lastNonUserIdx = i;
+                              break;
+                            }
+                          }
+
+                          final isLatest = idx == lastNonUserIdx;
+                          final isExpanded =
+                              isLatest || _expandedTurnKeys.contains(idx);
+
+                          if (isExpanded) {
+                            return _AgentTurnWidget(
+                              key: ValueKey(turnKey),
+                              messages: group,
+                              modelName: msg.model ?? fallbackModel,
+                            );
+                          }
+
+                          return _CollapsedTurnRow(
+                            key: ValueKey('collapsed_$idx'),
+                            turnKey: turnKey,
+                            messages: group,
+                            modelName: msg.model ?? fallbackModel,
+                            onExpand: () => setState(() {
+                              _expandedTurnKeys.add(idx);
+                              _collapseVersion++;
+                              _shouldStickToBottom = false;
+                            }),
+                          );
+                        }, childCount: messages.length),
+                      );
+                    },
+                  ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
+              sliver:
+                  Selector<
+                    NodeProvider,
+                    (List<MessagePart>, bool, List<StreamingToolEvent>, String?)
+                  >(
+                    selector: (ctx, p) {
+                      final t = p.getTask(widget.taskId);
+                      return (
+                        t?.streamingParts ?? const [],
+                        t?.status == 'running',
+                        t?.toolEvents ?? const [],
+                        t?.statusLabel,
+                      );
+                    },
+                    builder: (context, data, _) {
+                      final streamingParts = data.$1;
+                      final isRunning = data.$2;
+                      final toolEvents = data.$3;
+                      final statusLabel = data.$4;
+                      final hasStreamingText = streamingParts.any(
+                        (part) => (part.text ?? '').trim().isNotEmpty,
+                      );
+                      final hasContent =
+                          hasStreamingText ||
+                          toolEvents.isNotEmpty ||
+                          statusLabel != null;
+                      if (!hasContent) {
+                        if (isRunning && _lastMessageCount == 0) {
+                          return const SliverToBoxAdapter(
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  CircularProgressIndicator(),
+                                  SizedBox(height: 8),
+                                  Text(
+                                    '等待 Agent 输出...',
+                                    style: TextStyle(color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        } else if (!isRunning && _lastMessageCount == 0) {
+                          return const SliverToBoxAdapter(
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.chat_bubble_outline,
+                                    size: 48,
+                                    color: Colors.grey,
+                                  ),
+                                  SizedBox(height: 8),
+                                  Text(
+                                    '暂无输出',
+                                    style: TextStyle(color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }
+                        return const SliverToBoxAdapter(
+                          child: SizedBox.shrink(),
+                        );
+                      }
+
+                      return SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (_streamingPartsTextLength(streamingParts) >
+                                  _maxRenderedStreamingChars)
+                                _OutputTruncationNotice(
+                                  omittedChars:
+                                      _streamingPartsTextLength(
+                                        streamingParts,
+                                      ) -
+                                      _maxRenderedStreamingChars,
+                                ),
+                              if (hasStreamingText)
+                                ..._buildStreamingPartWidgets(
+                                  context,
+                                  streamingParts,
+                                  isFinal: !isRunning,
+                                ),
+                              // Structured tool events
+                              if (toolEvents.isNotEmpty)
+                                _buildStreamingToolChips(
+                                  context,
+                                  toolEvents,
+                                  isFinal: !isRunning,
+                                ),
+                              // Status label (compaction, retry, etc.)
+                              if (statusLabel != null)
+                                _StatusLabel(label: statusLabel),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+            ),
+          ],
         ),
+
+        // Fold All button — only visible when at least one turn is manually expanded.
+        if (canFold)
+          Positioned(
+            right: 12,
+            bottom: 88,
+            child: Material(
+              color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(20),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: () => setState(() {
+                  _expandedTurnKeys.clear();
+                  _collapseVersion++;
+                  _shouldStickToBottom = true;
+                  _scrollToBottom(animate: false);
+                }),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Icon(
+                    Icons.unfold_less_rounded,
+                    size: 18,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+        // Scroll-to-bottom button when not at bottom.
+        if (!_shouldStickToBottom)
+          Positioned(
+            right: 12,
+            bottom: 136,
+            child: Material(
+              color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(20),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: () => _scrollToBottom(animate: false),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Icon(
+                    Icons.keyboard_double_arrow_down_rounded,
+                    size: 18,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
-    ),
-
-    // Fold All button — only visible when at least one turn is manually expanded.
-    if (canFold)
-      Positioned(
-        right: 12,
-        bottom: 88,
-        child: Material(
-          color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
-          borderRadius: BorderRadius.circular(20),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(20),
-            onTap: () => setState(() {
-              _expandedTurnKeys.clear();
-              _collapseVersion++;
-              _shouldStickToBottom = true;
-              _scrollToBottom(animate: false);
-            }),
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Icon(Icons.unfold_less_rounded, size: 18, color: cs.onSurfaceVariant),
-            ),
-          ),
-        ),
-      ),
-
-    // Scroll-to-bottom button when not at bottom.
-    if (!_shouldStickToBottom)
-      Positioned(
-        right: 12,
-        bottom: 136,
-        child: Material(
-          color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
-          borderRadius: BorderRadius.circular(20),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(20),
-            onTap: () => _scrollToBottom(animate: false),
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Icon(Icons.keyboard_double_arrow_down_rounded, size: 18, color: cs.onSurfaceVariant),
-            ),
-          ),
-        ),
-      ),
-  ],
-);
+    );
   }
-
 }
 
-/// Streaming text rendered as markdown.
-/// Structural tags (thinking, tool markers, etc.) are stripped —
-/// they are rendered separately via structured events.
-List<Widget> _buildStreamingTextWidgets(
+int _streamingPartsTextLength(List<MessagePart> parts) {
+  var length = 0;
+  for (final part in parts) {
+    length += part.text?.length ?? 0;
+  }
+  return length;
+}
+
+/// Streaming content rendered from protocol-structured parts.
+List<Widget> _buildStreamingPartWidgets(
   BuildContext context,
-  String streamingText, {
-  bool isThinking = false,
+  List<MessagePart> streamingParts, {
   bool isFinal = true,
 }) {
-  final theme = Theme.of(context);
-  final cs = theme.colorScheme;
-  var text = streamingText.length <= _maxRenderedStreamingChars
-      ? streamingText
-      : streamingText.substring(streamingText.length - _maxRenderedStreamingChars);
-  // Strip structural markers — tool chips / results / etc. are rendered
-  // from structured events, not from embedded text markers.
-  text = text_utils.stripTags(text);
-  if (text.trim().isEmpty) return [];
-  final widget = RepaintBoundary(
-    child: PiMarkdown(
-      text,
-      style: theme.textTheme.bodyMedium?.copyWith(
-        height: 1.6,
-        color: cs.onSurface.withValues(alpha: 0.85),
-      ),
-    ),
-  );
-  if (isThinking) {
-    return [RepaintBoundary(child: _ThinkingBlock(text: text))];
-  }
-  return [widget];
+  return _buildHistoryPartWidgets(context, streamingParts, isFinal: isFinal);
 }
 
 /// Render structured tool events as chips.
@@ -818,6 +838,7 @@ Widget _buildStreamingToolChips(
   return Padding(
     padding: const EdgeInsets.symmetric(vertical: 4),
     child: _ToolGroupPanel(
+      key: ValueKey('streaming_tools_${toolEvents.length}_$isFinal'),
       chips: chips,
       forceExpanded: !isFinal,
     ),
@@ -923,7 +944,7 @@ class _StatusLabel extends StatelessWidget {
               color: cs.onSurfaceVariant,
             ),
           ),
-          SizedBox(width: 8),
+          const SizedBox(width: 8),
           Text(
             label,
             style: theme.textTheme.bodySmall?.copyWith(
@@ -957,314 +978,6 @@ class _OutputTruncationNotice extends StatelessWidget {
   }
 }
 
-/// 消息片段类型
-enum _MessagePartType {
-  markdown,
-  thinking,
-  toolCall,
-  toolResult,
-  skill,
-  spacer,
-}
-
-/// 消息片段数据（不含 Widget，可安全缓存）
-class _MessagePart {
-  final _MessagePartType type;
-  final String? text;
-  final String? name;
-  final String? status;
-  final double? space;
-
-  const _MessagePart.markdown(this.text)
-    : type = _MessagePartType.markdown,
-      name = null,
-      status = null,
-      space = null;
-
-  const _MessagePart.thinking(this.text)
-    : type = _MessagePartType.thinking,
-      name = null,
-      status = null,
-      space = null;
-
-  const _MessagePart.toolCall(this.name)
-    : type = _MessagePartType.toolCall,
-      text = null,
-      status = null,
-      space = null;
-
-  const _MessagePart.toolResult(this.name, this.status, this.text)
-    : type = _MessagePartType.toolResult,
-      space = null;
-
-  const _MessagePart.skill(this.name)
-    : type = _MessagePartType.skill,
-      text = null,
-      status = null,
-      space = null;
-
-  const _MessagePart.spacer(this.space)
-    : type = _MessagePartType.spacer,
-      text = null,
-      name = null,
-      status = null;
-}
-
-/// 解析器 — 正则编译一次，解析结果 LRU 缓存
-class _MessagePartsParser {
-  static final _thinkingRegex = RegExp(
-    r'<thinking>(.*?)</thinking>',
-    dotAll: true,
-  );
-  static final _toolRegex = RegExp(r'\[工具: (.+?)\]');
-  static final _toolResultRegex = RegExp(
-    r'<tool_result name="(.+?)" status="(.+?)">(.*?)</tool_result>',
-    dotAll: true,
-  );
-  static final _skillRegex = RegExp(r'<skill>(.*?)</skill>', dotAll: true);
-  static final _allMarkersRegex = RegExp(
-    r'(<thinking>.*?</thinking>|\[工具: .+?\]|<tool_result .*?>.*?</tool_result>|<skill>.*?</skill>)',
-    dotAll: true,
-  );
-
-  static final _cache = <String, List<_MessagePart>>{};
-  static const _maxCacheSize = 100;
-
-  static List<_MessagePart> parse(String text) {
-    final normalizedText = text_utils.closeOpenThinkingTag(text);
-    final cached = _cache[normalizedText];
-    if (cached != null) return cached;
-
-    final result = _doParse(normalizedText);
-
-    if (_cache.length >= _maxCacheSize) {
-      _cache.remove(_cache.keys.first);
-    }
-    _cache[normalizedText] = result;
-
-    return result;
-  }
-
-  static List<_MessagePart> _doParse(String text) {
-    final parts = <_MessagePart>[];
-    int lastIndex = 0;
-    var lastToolCallName = '';
-
-    // If this text contains [工具: name] but NO <tool_result>, the results
-    // arrive as separate JSONL messages.  Skip toolCall parts to avoid
-    // rendering orphan "failed" chips — the toolResult message will render
-    // its own chip.
-    final hasToolResults = text.contains('<tool_result');
-
-    final matches = _allMarkersRegex.allMatches(text);
-    for (final match in matches) {
-      if (match.start > lastIndex) {
-        _addMarkdown(parts, text.substring(lastIndex, match.start));
-        lastToolCallName = '';
-      }
-
-      final matchText = match.group(0)!;
-      if (matchText.startsWith('<thinking>')) {
-        lastToolCallName = '';
-        final thinking =
-            _thinkingRegex.firstMatch(matchText)?.group(1)?.trim() ?? '';
-        parts.add(_MessagePart.thinking(thinking));
-      } else if (matchText.startsWith('[工具:')) {
-        final toolName =
-            _toolRegex.firstMatch(matchText)?.group(1) ?? 'unknown';
-        if (toolName != lastToolCallName) {
-          lastToolCallName = toolName;
-          // Only emit toolCall when matching toolResult exists in same text.
-          // Otherwise the result comes as a separate JSONL message.
-          if (hasToolResults) {
-            parts.add(_MessagePart.toolCall(toolName));
-          }
-        }
-      } else if (matchText.startsWith('<tool_result')) {
-        lastToolCallName = '';
-        final m = _toolResultRegex.firstMatch(matchText);
-        final name = m?.group(1) ?? 'unknown';
-        final status = m?.group(2) ?? '';
-        final content = m?.group(3)?.trim() ?? '';
-        parts.add(_MessagePart.toolResult(name, status, content));
-      } else if (matchText.startsWith('<skill>')) {
-        lastToolCallName = '';
-        final skillName =
-            _skillRegex.firstMatch(matchText)?.group(1)?.trim() ?? '';
-        parts.add(_MessagePart.skill(skillName));
-      }
-
-      lastIndex = match.end;
-    }
-
-    if (lastIndex < text.length) {
-      _addMarkdown(parts, text.substring(lastIndex));
-    }
-
-    return parts;
-  }
-
-  static void _addMarkdown(List<_MessagePart> parts, String raw) {
-    final leading = _countNewlines(raw, leading: true);
-    final trailing = _countNewlines(raw, leading: false);
-
-    _addSpacing(parts, leading);
-
-    final trimmed = raw.trim();
-    if (trimmed.isNotEmpty) {
-      parts.add(_MessagePart.markdown(trimmed));
-    }
-
-    _addSpacing(parts, trailing);
-  }
-
-  static int _countNewlines(String s, {bool leading = true}) {
-    int count = 0;
-    if (leading) {
-      for (int i = 0; i < s.length && s[i] == '\n'; i++) {
-        count++;
-      }
-    } else {
-      for (int i = s.length - 1; i >= 0 && s[i] == '\n'; i--) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  static void _addSpacing(List<_MessagePart> parts, int count) {
-    if (count >= 2) {
-      parts.add(const _MessagePart.spacer(8));
-    } else if (count >= 1) {
-      parts.add(const _MessagePart.spacer(4));
-    }
-  }
-}
-
-/// 构建 Widgets — 基于缓存的解析结果，每次 build 只做 widget 创建
-List<Widget> _buildMessagePartWidgets(
-  BuildContext context,
-  List<_MessagePart> parts, {
-  bool isFinal = true,
-}) {
-  final theme = Theme.of(context);
-  final cs = theme.colorScheme;
-  final widgets = <Widget>[];
-
-  int i = 0;
-  while (i < parts.length) {
-    final part = parts[i];
-
-    if (part.type == _MessagePartType.toolCall ||
-        part.type == _MessagePartType.toolResult ||
-        part.type == _MessagePartType.skill) {
-      final toolWidgets = <Widget>[];
-      int j = i;
-
-      while (j < parts.length) {
-        final nextPart = parts[j];
-        if (nextPart.type == _MessagePartType.toolCall) {
-          bool hasResult = false;
-          for (int k = j + 1; k < parts.length; k++) {
-            if (parts[k].type == _MessagePartType.toolResult &&
-                parts[k].name == nextPart.name) {
-              hasResult = true;
-              break;
-            }
-          }
-          if (!hasResult) {
-            toolWidgets.add(
-              _ToolChip(
-                key: ValueKey('tc_$j'),
-                toolName: nextPart.name!,
-                status: null,
-                isLoading: !isFinal,
-              ),
-            );
-          }
-        } else if (nextPart.type == _MessagePartType.toolResult) {
-          toolWidgets.add(
-            _ToolChip(
-              key: ValueKey('tr_$j'),
-              toolName: nextPart.name!,
-              status: nextPart.status,
-              content: nextPart.text,
-            ),
-          );
-        } else if (nextPart.type == _MessagePartType.skill) {
-          toolWidgets.add(
-            _ToolChip(
-              key: ValueKey('sk_$j'),
-              toolName: nextPart.name!,
-              status: 'skill',
-            ),
-          );
-        } else if (nextPart.type == _MessagePartType.spacer) {
-          // ignore spacer inside tool groups
-        } else {
-          // Break group if it's text, thinking, etc.
-          // BUT ignore empty markdown
-          if (nextPart.type == _MessagePartType.markdown &&
-              (nextPart.text == null || nextPart.text!.trim().isEmpty)) {
-            // ignore
-          } else {
-            break;
-          }
-        }
-        j++;
-      }
-
-      if (toolWidgets.isNotEmpty) {
-        widgets.add(
-          Padding(
-            key: ValueKey('tg_$i'),
-            padding: const EdgeInsets.symmetric(vertical: 2),
-            child: _ToolGroupPanel(
-              chips: toolWidgets,
-              forceExpanded: !isFinal,
-            ),
-          ),
-        );
-      }
-      i = j;
-      continue;
-    }
-
-    switch (part.type) {
-      case _MessagePartType.markdown:
-        widgets.add(
-          RepaintBoundary(
-            key: ValueKey('md_$i'),
-            child: PiMarkdown(
-              part.text!,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                height: 1.6,
-                color: cs.onSurface.withValues(alpha: 0.85),
-              ),
-            ),
-          ),
-        );
-        break;
-      case _MessagePartType.thinking:
-        widgets.add(
-          RepaintBoundary(
-            key: ValueKey('think_$i'),
-            child: _ThinkingBlock(text: part.text!),
-          ),
-        );
-        break;
-      case _MessagePartType.spacer:
-        widgets.add(SizedBox(key: ValueKey('sp_$i'), height: part.space!));
-        break;
-      default:
-        break;
-    }
-    i++;
-  }
-
-  return widgets;
-}
-
 /// Collapsed preview row for an agent turn group.
 /// Shows model name + text preview + tool count in a single compact line.
 /// Tapping expands the turn.
@@ -1292,21 +1005,21 @@ class _CollapsedTurnRow extends StatelessWidget {
       (m) => m.role != 'toolResult',
       orElse: () => messages.first,
     );
-    final previewRaw = firstNonTool.text.replaceAll('\n', ' ').trim();
+    final previewRaw = firstNonTool.structuredPreviewText
+        .replaceAll('\n', ' ')
+        .trim();
     final preview = previewRaw.length > 120
         ? '${previewRaw.substring(0, 120)}…'
         : previewRaw;
 
     final toolCount = messages
         .where(
-          (m) => m.role == 'toolResult' ||
+          (m) =>
+              m.role == 'toolResult' ||
               (m.parts.isNotEmpty &&
                   m.parts.any((p) => p.type == MessagePartType.toolCall)),
         )
         .length;
-
-    final label =
-        modelName != null && modelName!.isNotEmpty ? modelName! : 'Pi Agent';
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
@@ -1380,7 +1093,9 @@ class _AgentTurnWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final label = modelName != null && modelName!.isNotEmpty ? modelName! : 'Pi Agent';
+    final label = modelName != null && modelName!.isNotEmpty
+        ? modelName!
+        : 'Pi Agent';
 
     return Container(
       margin: const EdgeInsets.only(top: 16, right: 16, bottom: 16, left: 4),
@@ -1418,7 +1133,11 @@ class _AgentTurnWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildTurnMessage(BuildContext context, PiSessionMessageInfo message, int index) {
+  Widget _buildTurnMessage(
+    BuildContext context,
+    PiSessionMessageInfo message,
+    int index,
+  ) {
     final isToolResult = message.role == 'toolResult';
     final hasStructuredParts = message.parts.isNotEmpty;
 
@@ -1429,20 +1148,31 @@ class _AgentTurnWidget extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
-            children: _buildHistoryPartWidgets(context, message.parts, isFinal: true),
+            children: _buildHistoryPartWidgets(
+              context,
+              message.parts,
+              isFinal: true,
+            ),
           ),
         );
       }
+      // Fallback: render raw text as markdown (old messages without parts)
       return Padding(
         padding: const EdgeInsets.only(bottom: 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
-          children: _buildMessagePartWidgets(
-            context,
-            _MessagePartsParser.parse(message.text),
-            isFinal: true,
-          ),
+          children: [
+            PiMarkdown(
+              message.text,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                height: 1.6,
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurface.withValues(alpha: 0.85),
+              ),
+            ),
+          ],
         ),
       );
     }
@@ -1451,16 +1181,27 @@ class _AgentTurnWidget extends StatelessWidget {
     if (hasStructuredParts) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: _buildHistoryPartWidgets(context, message.parts, isFinal: true),
+        children: _buildHistoryPartWidgets(
+          context,
+          message.parts,
+          isFinal: true,
+        ),
       );
     }
+    // Fallback: render raw text as markdown (old messages without parts)
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: _buildMessagePartWidgets(
-        context,
-        _MessagePartsParser.parse(message.text),
-        isFinal: true,
-      ),
+      children: [
+        PiMarkdown(
+          message.text,
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            height: 1.6,
+            color: Theme.of(
+              context,
+            ).colorScheme.onSurface.withValues(alpha: 0.85),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1484,6 +1225,7 @@ class _MessageItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final cs = theme.colorScheme;
 
     if (isUser) {
       return Align(
@@ -1539,18 +1281,21 @@ class _MessageItem extends StatelessWidget {
             ),
           );
         }
-        // Fallback for old messages without parts
-        final parsedParts = _MessagePartsParser.parse(message.text);
+        // Fallback: render raw text as markdown (old messages without parts)
         return Padding(
           padding: const EdgeInsets.only(bottom: 4, left: 4, right: 16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
-            children: _buildMessagePartWidgets(
-              context,
-              parsedParts,
-              isFinal: isFinal,
-            ),
+            children: [
+              PiMarkdown(
+                message.text,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  height: 1.6,
+                  color: cs.onSurface.withValues(alpha: 0.85),
+                ),
+              ),
+            ],
           ),
         );
       }
@@ -1600,10 +1345,12 @@ class _MessageItem extends StatelessWidget {
                 isFinal: isFinal,
               )
             else
-              ..._buildMessagePartWidgets(
-                context,
-                _MessagePartsParser.parse(message.text),
-                isFinal: isFinal,
+              PiMarkdown(
+                message.text,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  height: 1.6,
+                  color: cs.onSurface.withValues(alpha: 0.85),
+                ),
               ),
           ],
         ),
@@ -1625,10 +1372,9 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
 
   /// First line or ~80 chars of thinking content for collapsed preview.
   String get _preview {
-    final firstLine = widget.text.split('\n').firstWhere(
-      (l) => l.trim().isNotEmpty,
-      orElse: () => '',
-    );
+    final firstLine = widget.text
+        .split('\n')
+        .firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
     if (firstLine.length <= 80) return firstLine;
     return '${firstLine.substring(0, 80)}…';
   }
@@ -1675,9 +1421,8 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                         TextSpan(
                           text: ' — $_preview',
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant.withValues(
-                              alpha: 0.38,
-                            ),
+                            color: theme.colorScheme.onSurfaceVariant
+                                .withValues(alpha: 0.38),
                             fontStyle: FontStyle.italic,
                             height: 1.4,
                           ),
@@ -1898,10 +1643,9 @@ class _ToolChipState extends State<_ToolChip> {
   String get _resultPreview {
     final text = widget.content;
     if (text == null || text.isEmpty) return '';
-    final firstLine = text.split('\n').firstWhere(
-      (l) => l.trim().isNotEmpty,
-      orElse: () => '',
-    );
+    final firstLine = text
+        .split('\n')
+        .firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
     if (firstLine.length <= 60) return firstLine;
     return '${firstLine.substring(0, 60)}…';
   }
@@ -1933,10 +1677,18 @@ class _ToolChipState extends State<_ToolChip> {
             ),
           )
         : isSuccess
-            ? Icon(Icons.check_circle_outline, size: 10, color: Colors.green.withValues(alpha: 0.7))
-            : isError
-                ? Icon(Icons.error_outline, size: 10, color: cs.error.withValues(alpha: 0.65))
-                : null;
+        ? Icon(
+            Icons.check_circle_outline,
+            size: 10,
+            color: Colors.green.withValues(alpha: 0.7),
+          )
+        : isError
+        ? Icon(
+            Icons.error_outline,
+            size: 10,
+            color: cs.error.withValues(alpha: 0.65),
+          )
+        : null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1972,9 +1724,7 @@ class _ToolChipState extends State<_ToolChip> {
                 const SizedBox(width: 5),
                 Expanded(
                   child: Text(
-                    isRunning
-                        ? '正在使用 ${widget.toolName}...'
-                        : widget.toolName,
+                    isRunning ? '正在使用 ${widget.toolName}...' : widget.toolName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
@@ -2001,10 +1751,7 @@ class _ToolChipState extends State<_ToolChip> {
                     ),
                   ),
                 ],
-                if (badge != null) ...[
-                  const SizedBox(width: 5),
-                  badge,
-                ],
+                if (badge != null) ...[const SizedBox(width: 5), badge],
                 if (canExpand) ...[
                   const SizedBox(width: 2),
                   Icon(
@@ -2590,33 +2337,6 @@ class _CommandListTile extends StatelessWidget {
         style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
       ),
       onTap: onTap,
-    );
-  }
-}
-
-/// 状态呼吸灯
-class _StatusDot extends StatelessWidget {
-  final bool online;
-  const _StatusDot({required this.online});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 10,
-      height: 10,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: online ? Colors.green : Colors.grey,
-        boxShadow: online
-            ? [
-                BoxShadow(
-                  color: Colors.green.withValues(alpha: 0.4),
-                  blurRadius: 4,
-                  spreadRadius: 1,
-                ),
-              ]
-            : null,
-      ),
     );
   }
 }

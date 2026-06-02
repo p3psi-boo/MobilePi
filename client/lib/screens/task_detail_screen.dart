@@ -253,11 +253,16 @@ class _OutputViewState extends State<_OutputView> {
   bool _programmaticScroll = false;
   static const _autoScrollThreshold = 50.0;
 
+  /// 缓存 provider 引用，避免在 dispose 中使用 context 查找
+  /// （dispose 时 Element 已非 active，会导致
+  /// "Looking up a deactivated widget's ancestor is unsafe"）。
+  late final NodeProvider _provider;
+
   @override
   void initState() {
     super.initState();
-    final provider = context.read<NodeProvider>();
-    final task = provider.getTask(widget.taskId);
+    _provider = context.read<NodeProvider>();
+    final task = _provider.getTask(widget.taskId);
 
     if (task != null) {
       _lastMessageCount = task.messages.length;
@@ -271,7 +276,7 @@ class _OutputViewState extends State<_OutputView> {
           task.sessionPath!.isNotEmpty) {
         _isLoadingMore = true;
         _isPrepending = true;
-        provider.requestSessionMessages(
+        _provider.requestSessionMessages(
           task.nodeId,
           task.id,
           task.sessionPath!,
@@ -281,21 +286,20 @@ class _OutputViewState extends State<_OutputView> {
     }
 
     _scrollController.addListener(_onScroll);
-    provider.addListener(_onProviderChanged);
+    _provider.addListener(_onProviderChanged);
     _scrollToBottom(animate: false);
   }
 
   @override
   void dispose() {
-    context.read<NodeProvider>().removeListener(_onProviderChanged);
+    _provider.removeListener(_onProviderChanged);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
 
   void _loadEarlier() {
-    final provider = context.read<NodeProvider>();
-    final task = provider.getTask(widget.taskId);
+    final task = _provider.getTask(widget.taskId);
     if (task == null || !_hasMore || _isLoadingMore) return;
     if (task.sessionPath == null || task.sessionPath!.isEmpty) return;
 
@@ -309,7 +313,7 @@ class _OutputViewState extends State<_OutputView> {
       _isLoadingMore = true;
       _isPrepending = true;
     });
-    provider.requestSessionMessages(
+    _provider.requestSessionMessages(
       task.nodeId,
       task.id,
       task.sessionPath!,
@@ -339,7 +343,7 @@ class _OutputViewState extends State<_OutputView> {
 
   void _onProviderChanged() {
     if (!mounted) return;
-    final task = context.read<NodeProvider>().getTask(widget.taskId);
+    final task = _provider.getTask(widget.taskId);
     if (task == null) return;
 
     _hasMore = task.nextBeforeIndex == null || task.nextBeforeIndex! > 0;

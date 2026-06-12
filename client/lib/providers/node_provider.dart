@@ -8,34 +8,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/node_state.dart';
+import '../services/session_cache.dart';
 import '../services/websocket_service.dart';
 
 const String _kHubUrlPrefKey = 'mobilepi.hubUrl';
 const String _kTenantKeyPrefKey = 'mobilepi.tenantKey';
 const String _kCursorPrefKey = 'mobilepi.cursors';
-const int _kMaxStreamingTextLength = 24000;
-
-/// 任务运行时状态
-/// A structured tool call recorded during streaming.
-class StreamingToolEvent {
-  final String name;
-  final String? id;
-  final bool isResult;
-  final bool isError;
-  final String? resultText;
-
-  const StreamingToolEvent.call({required this.name, this.id})
-    : isResult = false,
-      isError = false,
-      resultText = null;
-
-  const StreamingToolEvent.result({
-    required this.name,
-    this.id,
-    required this.isError,
-    required this.resultText,
-  }) : isResult = true;
-}
+const Duration _kStreamingNotifyInterval = Duration(milliseconds: 80);
 
 class TaskState {
   final String id;
@@ -62,10 +41,6 @@ class TaskState {
   final int? nextBeforeIndex;
   final int? totalCount;
   final DateTime createdAt;
-
-  /// Structured tool events accumulated during streaming.
-  /// Filled by `toolCall`/`toolResult` protocol payloads — never from text.
-  final List<StreamingToolEvent> toolEvents;
 
   /// Whether the model is currently thinking (structured boundary).
   /// `true` after `thinking: "start"`, `false` after `thinking: "end"`.
@@ -94,7 +69,6 @@ class TaskState {
     this.linesRemoved,
     this.nextBeforeIndex,
     this.totalCount,
-    this.toolEvents = const [],
     this.isThinking = false,
     this.statusLabel,
     DateTime? createdAt,
@@ -116,7 +90,6 @@ class TaskState {
     int? linesRemoved,
     int? nextBeforeIndex,
     int? totalCount,
-    List<StreamingToolEvent>? toolEvents,
     bool? isThinking,
     String? statusLabel,
   }) {
@@ -140,7 +113,6 @@ class TaskState {
       linesRemoved: linesRemoved ?? this.linesRemoved,
       nextBeforeIndex: nextBeforeIndex ?? this.nextBeforeIndex,
       totalCount: totalCount ?? this.totalCount,
-      toolEvents: toolEvents ?? this.toolEvents,
       isThinking: isThinking ?? this.isThinking,
       statusLabel: statusLabel ?? this.statusLabel,
       createdAt: createdAt,
@@ -239,8 +211,14 @@ class ProjectSessionState {
 /// 管理 WebSocket 连接、Node 列表、任务状态。
 class NodeProvider extends ChangeNotifier {
   final WebSocketService _ws;
+  final SessionCache _sessionCache;
+  final bool _closeSessionCacheOnDispose;
   final Map<String, NodeState> _nodes = {};
   final Map<String, TaskState> _tasks = {};
+  final Map<String, ValueNotifier<TaskState?>> _taskNotifiers = {};
+  final Set<String> _pendingStreamingTaskNotifications = {};
+  final ValueNotifier<List<TaskState>> _recentTasksNotifier =
+      ValueNotifier<List<TaskState>>(const []);
   final Map<String, Map<String, int>> _cursorsByNode = {};
   final Map<String, Completer<DirectoryListing>> _pendingBrowse = {};
   final Map<String, Completer<String>> _pendingCreate = {};
@@ -248,13 +226,16 @@ class NodeProvider extends ChangeNotifier {
   late final StreamSubscription<bool> _connectionSub;
   Timer? _streamingNotifyTimer;
   Timer? _cursorSaveTimer;
+  Timer? _sessionCacheSaveTimer;
   late String _hubUrl;
   late String _tenantKey;
   bool _connecting = false;
   bool _settingsLoaded = false;
 
-  NodeProvider({WebSocketService? webSocketService})
-    : _ws = webSocketService ?? WebSocketService() {
+  NodeProvider({WebSocketService? webSocketService, SessionCache? sessionCache})
+    : _ws = webSocketService ?? WebSocketService(),
+      _sessionCache = sessionCache ?? SessionCache.shared(),
+      _closeSessionCacheOnDispose = sessionCache != null {
     _hubUrl = _ws.hubUrl;
     _tenantKey = _ws.tenantKey;
     _messageSub = _ws.messageStream.listen(_onMessage);
@@ -281,6 +262,9 @@ class NodeProvider extends ChangeNotifier {
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return List.unmodifiable(tasks);
   }
+
+  ValueListenable<List<TaskState>> get recentTasksListenable =>
+      _recentTasksNotifier;
 
   bool get isConnecting => _connecting;
   bool get isConnected => _ws.isConnected;
@@ -310,6 +294,7 @@ class NodeProvider extends ChangeNotifier {
       if (rawCursors != null && rawCursors.isNotEmpty) {
         _restoreCursors(rawCursors);
       }
+      await _hydrateSessionCache();
     } catch (_) {
       // SharedPreferences 在某些平台 / 测试里可能不可用
     }
@@ -376,7 +361,9 @@ class NodeProvider extends ChangeNotifier {
 
   void refresh() {
     if (_ws.isConnected) {
-      _sendHelloAndResume();
+      _connecting = true;
+      notifyListeners();
+      _ws.forceReconnect();
     } else {
       connect();
     }
@@ -386,7 +373,13 @@ class NodeProvider extends ChangeNotifier {
   /// 即便 `_ws.isConnected` 仍为 true，移动端冻结后的 socket 也可能是僵尸，
   /// 故走 forceReconnect 重建连接（重连成功后 _onConnectionChanged 会 resume）。
   void onAppResumed() {
-    if (!hasTenantKey) return;
+    if (!hasTenantKey) {
+      debugPrint(
+        'MobilePiLifecycle event=app_resumed action=skip_missing_tenant_key',
+      );
+      return;
+    }
+    debugPrint('MobilePiLifecycle event=app_resumed action=force_reconnect');
     _ws.forceReconnect();
   }
 
@@ -580,6 +573,19 @@ class NodeProvider extends ChangeNotifier {
       _applyNodeSummary(summary, from: nodeId);
     }
 
+    final nodeId = _normalizeNodeId(message.from);
+    final truncatedStreams =
+        (payload[ProtocolPayloadKeys.truncatedStreams] as List<dynamic>?)
+            ?.whereType<Map>()
+            .map((stream) => Map<String, dynamic>.from(stream))
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    if (truncatedStreams.isNotEmpty) {
+      for (final stream in truncatedStreams) {
+        _applyTruncatedStreamSnapshot(nodeId, stream);
+      }
+    }
+
     final events =
         (payload[ProtocolPayloadKeys.events] as List<dynamic>?)
             ?.whereType<Map>()
@@ -587,11 +593,44 @@ class NodeProvider extends ChangeNotifier {
             .toList() ??
         const <Map<String, dynamic>>[];
     if (events.isNotEmpty) {
-      final nodeId = _normalizeNodeId(message.from);
       for (final event in events) {
         _applyProtocolEvent(nodeId, event, notify: false);
       }
       _notifyNow();
+    } else if (truncatedStreams.isNotEmpty) {
+      _notifyNow();
+    }
+
+    if (payload[ProtocolPayloadKeys.hasMore] == true) {
+      _ws.sendResume(nodeId, _cursorsByNode[nodeId] ?? const {});
+    }
+  }
+
+  void _applyTruncatedStreamSnapshot(
+    String nodeId,
+    Map<String, dynamic> stream,
+  ) {
+    final snapshot = stream['snapshot'];
+    if (snapshot is Map) {
+      _applyProtocolEvent(
+        nodeId,
+        Map<String, dynamic>.from(snapshot),
+        notify: false,
+      );
+      return;
+    }
+
+    final streamId = stream[ProtocolPayloadKeys.streamId]?.toString();
+    final latestSeq = _intValue(stream['latestSeq']);
+    if (streamId == null || streamId.isEmpty || latestSeq == null) return;
+
+    final nodeCursors = _cursorsByNode.putIfAbsent(
+      nodeId,
+      () => <String, int>{},
+    );
+    if (latestSeq > (nodeCursors[streamId] ?? 0)) {
+      nodeCursors[streamId] = latestSeq;
+      _scheduleCursorSave();
     }
   }
 
@@ -688,6 +727,8 @@ class NodeProvider extends ChangeNotifier {
         .map((e) => PiSessionMessageInfo.fromJson(Map<String, dynamic>.from(e)))
         .toList();
     final model = payload[ProtocolPayloadKeys.model]?.toString();
+    final sessionId = payload['sessionId']?.toString();
+    final sessionPath = payload[ProtocolPayloadKeys.sessionPath]?.toString();
     final piInstanceId = payload[ProtocolPayloadKeys.piInstanceId]?.toString();
     final progressPercent = payload['progressPercent'] as int?;
     final linesAdded = payload['linesAdded'] as int?;
@@ -712,29 +753,6 @@ class NodeProvider extends ChangeNotifier {
 
     final existing = _tasks[taskId];
 
-    // Build updated tool events list
-    var toolEvents = existing?.toolEvents ?? <StreamingToolEvent>[];
-    if (toolCallRaw is Map) {
-      toolEvents = [
-        ...toolEvents,
-        StreamingToolEvent.call(
-          name: toolCallRaw['name']?.toString() ?? '',
-          id: toolCallRaw['id']?.toString(),
-        ),
-      ];
-    }
-    if (toolResultRaw is Map) {
-      toolEvents = [
-        ...toolEvents,
-        StreamingToolEvent.result(
-          name: toolResultRaw['name']?.toString() ?? '',
-          id: toolResultRaw['id']?.toString(),
-          isError: toolResultRaw['isError'] == true,
-          resultText: toolResultRaw['text']?.toString(),
-        ),
-      ];
-    }
-
     // Thinking boundary
     bool? isThinking;
     if (thinkingRaw == 'start') isThinking = true;
@@ -746,88 +764,163 @@ class NodeProvider extends ChangeNotifier {
     if (nextStreamingText == null && streamingDelta != null) {
       nextStreamingText = '${existing?.streamingText ?? ''}$streamingDelta';
     }
-    if (nextStreamingText != null &&
-        nextStreamingText.length > _kMaxStreamingTextLength) {
-      nextStreamingText = nextStreamingText.substring(
-        nextStreamingText.length - _kMaxStreamingTextLength,
-      );
-    }
 
     final nextStreamingParts = _structuredStreamingParts(
       existing: existing,
       streamingText: streamingText,
       streamingDelta: streamingDelta,
+      toolCallRaw: toolCallRaw,
+      toolResultRaw: toolResultRaw,
       isThinking: isThinking ?? existing?.isThinking ?? false,
     );
 
+    final incremental = _isRunningIncrementalUpdate(
+      existing: existing,
+      status: status,
+      streamingText: streamingText,
+      streamingDelta: streamingDelta,
+      toolCallRaw: toolCallRaw,
+      toolResultRaw: toolResultRaw,
+      thinkingRaw: thinkingRaw,
+      statusLabel: statusLabel,
+      progressPercent: progressPercent,
+      linesAdded: linesAdded,
+      linesRemoved: linesRemoved,
+    );
+
     if (existing != null) {
-      _tasks[taskId] = existing.copyWith(
-        status: status,
-        piInstanceId: piInstanceId,
-        model: model,
-        streamingText: nextStreamingText,
-        streamingParts: nextStreamingParts,
-        messages: messages,
-        progressPercent: progressPercent,
-        linesAdded: linesAdded,
-        linesRemoved: linesRemoved,
-        toolEvents: toolEvents,
-        isThinking: isThinking,
-        statusLabel: statusLabel,
+      _setTask(
+        existing.copyWith(
+          status: status,
+          sessionId: sessionId,
+          sessionPath: sessionPath,
+          piInstanceId: piInstanceId,
+          model: model,
+          streamingText: nextStreamingText,
+          streamingParts: nextStreamingParts,
+          messages: messages,
+          progressPercent: progressPercent,
+          linesAdded: linesAdded,
+          linesRemoved: linesRemoved,
+          isThinking: isThinking,
+          statusLabel: statusLabel,
+        ),
+        notifyTask: !incremental,
       );
     } else {
-      _tasks[taskId] = TaskState(
-        id: taskId,
-        nodeId: nodeId,
-        projectId: project.id,
-        projectPath: project.path,
-        sessionId: _sessionIdForNode(nodeId),
-        piInstanceId: piInstanceId,
-        model: model,
-        title: payload[ProtocolPayloadKeys.title]?.toString() ?? '任务 $taskId',
-        status: status,
-        streamingText: nextStreamingText,
-        streamingParts: nextStreamingParts ?? const [],
-        messages: messages ?? const [],
-        progressPercent: progressPercent,
-        linesAdded: linesAdded,
-        linesRemoved: linesRemoved,
-        toolEvents: toolEvents,
-        isThinking: isThinking ?? false,
-        statusLabel: statusLabel,
+      _setTask(
+        TaskState(
+          id: taskId,
+          nodeId: nodeId,
+          projectId: project.id,
+          projectPath: project.path,
+          sessionId: sessionId ?? _sessionIdForNode(nodeId),
+          sessionPath: sessionPath,
+          piInstanceId: piInstanceId,
+          model: model,
+          title: payload[ProtocolPayloadKeys.title]?.toString() ?? '任务 $taskId',
+          status: status,
+          streamingText: nextStreamingText,
+          streamingParts: nextStreamingParts ?? const [],
+          messages: messages ?? const [],
+          progressPercent: progressPercent,
+          linesAdded: linesAdded,
+          linesRemoved: linesRemoved,
+          isThinking: isThinking ?? false,
+          statusLabel: statusLabel,
+        ),
       );
     }
+    _scheduleSessionCacheSave();
 
-    if (!notify) return;
-    if (existing != null && status == 'running' && nextStreamingText != null) {
-      _notifyStreamingSoon();
+    if (incremental) {
+      if (!notify) {
+        _pendingStreamingTaskNotifications.add(taskId);
+        return;
+      }
+      _notifyStreamingSoon(taskId);
     } else {
+      if (!notify) return;
       _notifyNow();
     }
     _pruneOldTasks();
+  }
+
+  bool _isRunningIncrementalUpdate({
+    required TaskState? existing,
+    required String status,
+    required String? streamingText,
+    required String? streamingDelta,
+    required dynamic toolCallRaw,
+    required dynamic toolResultRaw,
+    required String? thinkingRaw,
+    required String? statusLabel,
+    required int? progressPercent,
+    required int? linesAdded,
+    required int? linesRemoved,
+  }) {
+    if (existing == null || status != 'running') return false;
+    return streamingText != null ||
+        streamingDelta != null ||
+        toolCallRaw is Map ||
+        toolResultRaw is Map ||
+        thinkingRaw != null ||
+        statusLabel != null ||
+        progressPercent != null ||
+        linesAdded != null ||
+        linesRemoved != null;
   }
 
   List<MessagePart>? _structuredStreamingParts({
     required TaskState? existing,
     required String? streamingText,
     required String? streamingDelta,
+    required dynamic toolCallRaw,
+    required dynamic toolResultRaw,
     required bool isThinking,
   }) {
-    if (streamingText == null && streamingDelta == null) return null;
+    if (streamingText == null &&
+        streamingDelta == null &&
+        toolCallRaw is! Map &&
+        toolResultRaw is! Map) {
+      return null;
+    }
 
     if (streamingText != null) {
       final part = isThinking
           ? MessagePart.thinking(streamingText)
           : MessagePart.text(streamingText);
-      return _trimStreamingParts([part]);
+      return [part];
+    }
+
+    final parts = List<MessagePart>.from(existing?.streamingParts ?? const []);
+    if (toolCallRaw is Map) {
+      parts.add(
+        MessagePart.toolCall(
+          toolCallRaw['name']?.toString() ?? '',
+          id: toolCallRaw['id']?.toString(),
+          input: toolCallRaw['input'] is Map
+              ? Map<String, dynamic>.from(toolCallRaw['input'] as Map)
+              : null,
+        ),
+      );
+    }
+    if (toolResultRaw is Map) {
+      parts.add(
+        MessagePart.toolResult(
+          name: toolResultRaw['name']?.toString() ?? '',
+          id: toolResultRaw['id']?.toString(),
+          status: toolResultRaw['isError'] == true ? '失败' : '成功',
+          text: toolResultRaw['text']?.toString(),
+        ),
+      );
     }
 
     final delta = streamingDelta;
     if (delta == null || delta.isEmpty) {
-      return existing?.streamingParts ?? const [];
+      return parts;
     }
 
-    final parts = List<MessagePart>.from(existing?.streamingParts ?? const []);
     if (parts.isEmpty || parts.last.type != _streamingPartType(isThinking)) {
       parts.add(
         isThinking ? MessagePart.thinking(delta) : MessagePart.text(delta),
@@ -839,41 +932,26 @@ class NodeProvider extends ChangeNotifier {
         isThinking ? MessagePart.thinking(text) : MessagePart.text(text),
       );
     }
-    return _trimStreamingParts(parts);
+    return parts;
   }
 
   MessagePartType _streamingPartType(bool isThinking) {
     return isThinking ? MessagePartType.thinking : MessagePartType.text;
   }
 
-  List<MessagePart> _trimStreamingParts(List<MessagePart> parts) {
-    var remaining = _kMaxStreamingTextLength;
-    final kept = <MessagePart>[];
-
-    for (final part in parts.reversed) {
-      final text = part.text ?? '';
-      if (text.isEmpty) continue;
-      if (text.length <= remaining) {
-        kept.add(part);
-        remaining -= text.length;
-        continue;
-      }
-      if (remaining > 0) {
-        kept.add(
-          _copyPartWithText(part, text.substring(text.length - remaining)),
-        );
-      }
-      break;
-    }
-
-    return kept.reversed.toList();
+  static String? _messageSourceIndexKey(PiSessionMessageInfo m) {
+    final sourceIndex = m.sourceIndex;
+    return sourceIndex == null ? null : 'idx:$sourceIndex';
   }
 
-  MessagePart _copyPartWithText(MessagePart part, String text) {
-    return switch (part.type) {
-      MessagePartType.thinking => MessagePart.thinking(text),
-      _ => MessagePart.text(text),
-    };
+  /// Fallback key for legacy cached/session preview messages that predate
+  /// sourceIndex. New paginated session responses should use sourceIndex.
+  static String _legacyMessageDedupKey(PiSessionMessageInfo m) {
+    final partSig = m.parts
+        .map((p) => '${p.type.name}/${p.name ?? ''}/${(p.text ?? '').length}')
+        .join('|');
+    final ts = m.timestamp?.toIso8601String() ?? '';
+    return 'legacy:${m.role}#$ts#${m.text.length}#$partSig';
   }
 
   void _handleSessionMessagesResponse(Map<String, dynamic> payload) {
@@ -899,21 +977,40 @@ class NodeProvider extends ChangeNotifier {
 
     if (targetTask == null) return;
 
-    // Filter duplicates just in case
-    final Set<String> existingKeys = targetTask.messages
-        .map((m) => '${m.role}:${m.text}')
+    final existingSourceIndexes = targetTask.messages
+        .map(_messageSourceIndexKey)
+        .whereType<String>()
         .toSet();
-    final uniqueNewMessages = newMessages
-        .where((m) => !existingKeys.contains('${m.role}:${m.text}'))
-        .toList();
+    final existingLegacyKeys = targetTask.messages
+        .where((message) => message.sourceIndex == null)
+        .map(_legacyMessageDedupKey)
+        .toSet();
+    final uniqueNewMessages = <PiSessionMessageInfo>[];
+    for (final message in newMessages) {
+      final sourceIndexKey = _messageSourceIndexKey(message);
+      if (sourceIndexKey != null) {
+        if (existingSourceIndexes.add(sourceIndexKey)) {
+          uniqueNewMessages.add(message);
+        }
+        continue;
+      }
+
+      final legacyKey = _legacyMessageDedupKey(message);
+      if (existingLegacyKeys.add(legacyKey)) {
+        uniqueNewMessages.add(message);
+      }
+    }
 
     final updatedMessages = [...uniqueNewMessages, ...targetTask.messages];
 
-    _tasks[targetTask.id] = targetTask.copyWith(
-      messages: updatedMessages,
-      nextBeforeIndex: nextBeforeIndex,
-      totalCount: totalCount,
+    _setTask(
+      targetTask.copyWith(
+        messages: updatedMessages,
+        nextBeforeIndex: nextBeforeIndex,
+        totalCount: totalCount,
+      ),
     );
+    _scheduleSessionCacheSave();
 
     notifyListeners();
   }
@@ -947,19 +1044,22 @@ class NodeProvider extends ChangeNotifier {
           );
 
     // 本地预创建任务
-    _tasks[taskId] = TaskState(
-      id: taskId,
-      nodeId: targetNodeId,
-      projectId: project.id,
-      projectPath: project.path,
-      sessionId: taskId,
-      agentType: agentType,
-      piInstanceId: piInstanceId,
-      model: model,
-      title: prompt.length > 80 ? '${prompt.substring(0, 80)}...' : prompt,
-      messages: [PiSessionMessageInfo(role: 'user', text: prompt)],
-      status: 'running',
+    _setTask(
+      TaskState(
+        id: taskId,
+        nodeId: targetNodeId,
+        projectId: project.id,
+        projectPath: project.path,
+        sessionId: taskId,
+        agentType: agentType,
+        piInstanceId: piInstanceId,
+        model: model,
+        title: prompt.length > 80 ? '${prompt.substring(0, 80)}...' : prompt,
+        messages: [PiSessionMessageInfo(role: 'user', text: prompt)],
+        status: 'running',
+      ),
     );
+    _scheduleSessionCacheSave();
     notifyListeners();
 
     _ws.sendTaskCommand(
@@ -992,6 +1092,19 @@ class NodeProvider extends ChangeNotifier {
     );
   }
 
+  void sendComposerMessage(String taskId, String message, {String? model}) {
+    final task = _tasks[taskId];
+    if (task == null) return;
+    if (_acceptsSteering(task.status)) {
+      sendSteer(taskId, message, model: model);
+    } else {
+      sendFollowUp(taskId, message, model: model);
+    }
+  }
+
+  bool _acceptsSteering(String status) =>
+      status == 'running' || status == 'waitingDecision';
+
   void sendFollowUp(String taskId, String message, {String? model}) {
     final task = _tasks[taskId];
     if (task == null) return;
@@ -1009,16 +1122,19 @@ class NodeProvider extends ChangeNotifier {
     final trimmed = message.trim();
     if (trimmed.isEmpty) return;
 
-    _tasks[task.id] = task.copyWith(
-      messages: [
-        ...task.messages,
-        PiSessionMessageInfo(
-          role: 'user',
-          text: trimmed,
-          timestamp: DateTime.now(),
-        ),
-      ],
+    _setTask(
+      task.copyWith(
+        messages: [
+          ...task.messages,
+          PiSessionMessageInfo(
+            role: 'user',
+            text: trimmed,
+            timestamp: DateTime.now(),
+          ),
+        ],
+      ),
     );
+    _scheduleSessionCacheSave();
     notifyListeners();
   }
 
@@ -1084,6 +1200,22 @@ class NodeProvider extends ChangeNotifier {
   }
 
   TaskState? getTask(String taskId) => _tasks[taskId];
+
+  ValueListenable<TaskState?> taskListenable(String taskId) {
+    return _taskNotifiers.putIfAbsent(
+      taskId,
+      () => ValueNotifier<TaskState?>(_tasks[taskId]),
+    );
+  }
+
+  /// 从本地列表中移除一个任务（用于首页左滑删除）。
+  /// 仅清理客户端缓存，不影响远端会话历史。
+  void removeTask(String taskId) {
+    if (_removeTaskState(taskId) != null) {
+      unawaited(_sessionCache.deleteTask(taskId));
+      notifyListeners();
+    }
+  }
 
   NodeState? getNode(String nodeId) => _nodes[nodeId];
 
@@ -1209,20 +1341,32 @@ class NodeProvider extends ChangeNotifier {
           ? _projectPathFromNode(_nodes[nodeId])
           : session.cwd.trim();
       final title = session.displayTitle;
-      _tasks[taskId] = TaskState(
-        id: taskId,
-        nodeId: nodeId,
-        projectId: _projectId(nodeId, projectPath),
-        projectPath: projectPath,
-        sessionId: session.id,
-        sessionPath: session.path,
-        title: title.length > 80 ? '${title.substring(0, 80)}...' : title,
-        status: 'history',
-        messages: session.messages,
-        createdAt: session.updatedAt,
+
+      // 详情页可能已通过分页加载了更完整的消息窗口（totalCount 非空即代表
+      // 收到过 session.messages 响应）。此处的周期性会话列表同步只携带预览，
+      // 若直接覆盖会把已加载的消息和分页状态清空 → 详情页瞬间变空白。
+      // 因此当已有加载窗口时，保留既有 messages / 分页游标。
+      final preserveWindow = existing != null && existing.totalCount != null;
+
+      _setTask(
+        TaskState(
+          id: taskId,
+          nodeId: nodeId,
+          projectId: _projectId(nodeId, projectPath),
+          projectPath: projectPath,
+          sessionId: session.id,
+          sessionPath: session.path,
+          title: title.length > 80 ? '${title.substring(0, 80)}...' : title,
+          status: 'history',
+          messages: preserveWindow ? existing.messages : session.messages,
+          nextBeforeIndex: preserveWindow ? existing.nextBeforeIndex : null,
+          totalCount: preserveWindow ? existing.totalCount : null,
+          createdAt: session.updatedAt,
+        ),
       );
     }
     _pruneOldTasks();
+    _scheduleSessionCacheSave();
   }
 
   void _pruneOldTasks() {
@@ -1234,22 +1378,80 @@ class NodeProvider extends ChangeNotifier {
         .take(_tasks.length - maxTasks)
         .toList();
     for (final key in toRemove) {
-      _tasks.remove(key);
+      _removeTaskState(key);
+      unawaited(_sessionCache.deleteTask(key));
     }
+  }
+
+  void _setTask(TaskState task, {bool notifyTask = true}) {
+    _tasks[task.id] = task;
+    if (notifyTask) {
+      _pendingStreamingTaskNotifications.remove(task.id);
+      _taskNotifiers[task.id]?.value = task;
+    }
+    _refreshRecentTasks();
+  }
+
+  TaskState? _removeTaskState(String taskId) {
+    final removed = _tasks.remove(taskId);
+    if (removed != null) {
+      _pendingStreamingTaskNotifications.remove(taskId);
+      _taskNotifiers[taskId]?.value = null;
+      _refreshRecentTasks();
+    }
+    return removed;
+  }
+
+  void _refreshRecentTasks() {
+    final next = recentTasks;
+    if (_taskListShallowEqual(_recentTasksNotifier.value, next)) return;
+    _recentTasksNotifier.value = next;
+  }
+
+  bool _taskListShallowEqual(List<TaskState> a, List<TaskState> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final ta = a[i];
+      final tb = b[i];
+      if (ta.id != tb.id ||
+          ta.status != tb.status ||
+          ta.progressPercent != tb.progressPercent ||
+          ta.displayTitle != tb.displayTitle ||
+          ta.nodeId != tb.nodeId ||
+          ta.projectPath != tb.projectPath ||
+          ta.model != tb.model ||
+          ta.createdAt != tb.createdAt) {
+        return false;
+      }
+    }
+    return true;
   }
 
   void _notifyNow() {
     _streamingNotifyTimer?.cancel();
     _streamingNotifyTimer = null;
+    _flushPendingStreamingTaskNotifications();
     notifyListeners();
   }
 
-  void _notifyStreamingSoon() {
+  void _notifyStreamingSoon(String taskId) {
+    _pendingStreamingTaskNotifications.add(taskId);
     if (_streamingNotifyTimer?.isActive == true) return;
-    _streamingNotifyTimer = Timer(const Duration(milliseconds: 80), () {
+    _streamingNotifyTimer = Timer(_kStreamingNotifyInterval, () {
       _streamingNotifyTimer = null;
-      notifyListeners();
+      _flushPendingStreamingTaskNotifications();
     });
+  }
+
+  void _flushPendingStreamingTaskNotifications() {
+    if (_pendingStreamingTaskNotifications.isEmpty) return;
+    final taskIds = List<String>.from(_pendingStreamingTaskNotifications);
+    _pendingStreamingTaskNotifications.clear();
+    for (final taskId in taskIds) {
+      final notifier = _taskNotifiers[taskId];
+      if (notifier == null) continue;
+      notifier.value = _tasks[taskId];
+    }
   }
 
   void _restoreCursors(String raw) {
@@ -1287,6 +1489,141 @@ class NodeProvider extends ChangeNotifier {
     } catch (_) {
       // Cursor persistence is an optimization; replay still works in-memory.
     }
+  }
+
+  Future<void> _hydrateSessionCache() async {
+    try {
+      final snapshots = await _sessionCache.loadRecent();
+      if (snapshots.isEmpty) return;
+      for (final snapshot in snapshots.reversed) {
+        final task = _taskFromCacheSnapshot(snapshot);
+        if (task != null) {
+          _setTask(task);
+        }
+      }
+    } catch (_) {
+      // Session cache is an optimization; network resume remains authoritative.
+    }
+  }
+
+  void _scheduleSessionCacheSave() {
+    if (_sessionCacheSaveTimer?.isActive == true) return;
+    _sessionCacheSaveTimer = Timer(const Duration(milliseconds: 500), () {
+      _sessionCacheSaveTimer = null;
+      unawaited(_persistSessionCache());
+    });
+  }
+
+  Future<void> _persistSessionCache() async {
+    try {
+      final now = DateTime.now();
+      await _sessionCache.saveSnapshots(
+        _tasks.values.map(
+          (task) => SessionSnapshot(
+            taskId: task.id,
+            nodeId: task.nodeId,
+            updatedAt: now,
+            payload: _taskToCachePayload(task),
+          ),
+        ),
+      );
+    } catch (_) {
+      // Session cache is a cold-start optimization; never block live sync.
+    }
+  }
+
+  Map<String, dynamic> _taskToCachePayload(TaskState task) {
+    return {
+      'id': task.id,
+      'nodeId': task.nodeId,
+      'projectId': task.projectId,
+      'projectPath': task.projectPath,
+      if (task.sessionId != null) 'sessionId': task.sessionId,
+      if (task.sessionPath != null) 'sessionPath': task.sessionPath,
+      'agentType': task.agentType,
+      if (task.piInstanceId != null) 'piInstanceId': task.piInstanceId,
+      if (task.model != null) 'model': task.model,
+      'title': task.title,
+      'status': task.status,
+      if (task.streamingText != null) 'streamingText': task.streamingText,
+      if (task.streamingParts.isNotEmpty)
+        'streamingParts': task.streamingParts
+            .map((part) => part.toJson())
+            .toList(),
+      if (task.messages.isNotEmpty)
+        'messages': task.messages.map((message) => message.toJson()).toList(),
+      if (task.progressPercent != null) 'progressPercent': task.progressPercent,
+      if (task.linesAdded != null) 'linesAdded': task.linesAdded,
+      if (task.linesRemoved != null) 'linesRemoved': task.linesRemoved,
+      if (task.nextBeforeIndex != null) 'nextBeforeIndex': task.nextBeforeIndex,
+      if (task.totalCount != null) 'totalCount': task.totalCount,
+      'createdAt': task.createdAt.toIso8601String(),
+      'isThinking': task.isThinking,
+      if (task.statusLabel != null) 'statusLabel': task.statusLabel,
+    };
+  }
+
+  TaskState? _taskFromCacheSnapshot(SessionSnapshot snapshot) {
+    final json = snapshot.payload;
+    final taskId = json['id']?.toString();
+    final nodeId = json['nodeId']?.toString() ?? snapshot.nodeId;
+    final projectId = json['projectId']?.toString();
+    final projectPath = json['projectPath']?.toString();
+    final title = json['title']?.toString();
+    if (taskId == null ||
+        taskId.isEmpty ||
+        nodeId.isEmpty ||
+        projectId == null ||
+        projectId.isEmpty ||
+        projectPath == null ||
+        projectPath.isEmpty ||
+        title == null) {
+      return null;
+    }
+    final streamingParts =
+        (json['streamingParts'] as List<dynamic>?)
+            ?.whereType<Map>()
+            .map(
+              (part) => MessagePart.fromJson(Map<String, dynamic>.from(part)),
+            )
+            .toList() ??
+        const <MessagePart>[];
+    final messages =
+        (json['messages'] as List<dynamic>?)
+            ?.whereType<Map>()
+            .map(
+              (message) => PiSessionMessageInfo.fromJson(
+                Map<String, dynamic>.from(message),
+              ),
+            )
+            .toList() ??
+        const <PiSessionMessageInfo>[];
+    return TaskState(
+      id: taskId,
+      nodeId: nodeId,
+      projectId: projectId,
+      projectPath: projectPath,
+      sessionId: json['sessionId']?.toString(),
+      sessionPath: json['sessionPath']?.toString(),
+      agentType: json['agentType']?.toString() ?? 'pi',
+      piInstanceId: json['piInstanceId']?.toString(),
+      model: json['model']?.toString(),
+      title: title,
+      status: json['status']?.toString() ?? 'history',
+      streamingText: json['streamingText']?.toString(),
+      streamingParts: streamingParts,
+      messages: messages,
+      progressPercent: _intValue(json['progressPercent']),
+      linesAdded: _intValue(json['linesAdded']),
+      linesRemoved: _intValue(json['linesRemoved']),
+      nextBeforeIndex: _intValue(json['nextBeforeIndex']),
+      totalCount: _intValue(json['totalCount']),
+      isThinking: json['isThinking'] == true,
+      statusLabel: json['statusLabel']?.toString(),
+      createdAt:
+          DateTime.tryParse(json['createdAt']?.toString() ?? '') ??
+          snapshot.updatedAt,
+    );
   }
 
   String _normalizeNodeId(String from) {
@@ -1346,9 +1683,20 @@ class NodeProvider extends ChangeNotifier {
   void dispose() {
     _streamingNotifyTimer?.cancel();
     _cursorSaveTimer?.cancel();
+    _sessionCacheSaveTimer?.cancel();
+    _pendingStreamingTaskNotifications.clear();
     unawaited(_persistCursors());
+    unawaited(_persistSessionCache());
     _messageSub.cancel();
     _connectionSub.cancel();
+    for (final notifier in _taskNotifiers.values) {
+      notifier.dispose();
+    }
+    _taskNotifiers.clear();
+    _recentTasksNotifier.dispose();
+    if (_closeSessionCacheOnDispose) {
+      unawaited(_sessionCache.close());
+    }
     _ws.dispose();
     super.dispose();
   }

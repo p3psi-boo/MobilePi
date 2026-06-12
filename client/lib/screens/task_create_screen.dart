@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/node_state.dart';
 import '../providers/node_provider.dart';
+import 'task_detail_screen.dart';
 
 /// 新对话页 —— Claude Mobile 风格 + 与「旧会话（详情页）」输入区一致：
 /// - 中央 Hero 标题 + 建议气泡
@@ -88,7 +90,8 @@ class _TaskCreateScreenState extends State<TaskCreateScreen> {
     final instanceId = _effectiveInstanceId(node);
 
     _sending.value = true;
-    provider.sendTaskCommand(
+    HapticFeedback.lightImpact();
+    final taskId = provider.sendTaskCommand(
       prompt,
       nodeId: node.nodeId,
       projectId: project.id,
@@ -98,8 +101,10 @@ class _TaskCreateScreenState extends State<TaskCreateScreen> {
     );
 
     _controller.clear();
-    _sending.value = false;
-    Navigator.of(context).pop();
+    // 发完即进入会话（替换当前页，返回时回到首页）。
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: taskId)),
+    );
   }
 
   NodeState? _defaultNode(List<NodeState> nodes) {
@@ -508,23 +513,25 @@ class _Composer extends StatelessWidget {
                 color: cs.outlineVariant.withValues(alpha: 0.6),
                 width: 0.8,
               ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.06),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
             ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 const SizedBox(width: 14),
                 IconButton(
-                  tooltip: '添加图片',
+                  tooltip: '图片上传（即将支持）',
                   icon: const Icon(Icons.photo_camera_outlined),
-                  color: cs.onSurface.withValues(alpha: 0.7),
-                  onPressed: enabled ? () => onInsertPrompt('请根据图片分析：') : null,
+                  color: cs.onSurface.withValues(alpha: 0.45),
+                  onPressed: enabled
+                      ? () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('图片上传即将支持'),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      : null,
                 ),
                 Expanded(
                   child: TextField(
@@ -534,7 +541,7 @@ class _Composer extends StatelessWidget {
                     enabled: enabled,
                     minLines: 1,
                     maxLines: 6,
-                    textInputAction: TextInputAction.send,
+                    textInputAction: TextInputAction.newline,
                     style: TextStyle(
                       fontSize: 15,
                       height: 1.4,
@@ -550,7 +557,6 @@ class _Composer extends StatelessWidget {
                         fontSize: 15,
                       ),
                     ),
-                    onSubmitted: (_) => onSend(),
                   ),
                 ),
                 Padding(
@@ -599,88 +605,159 @@ class _Composer extends StatelessWidget {
       showDragHandle: true,
       isScrollControlled: true,
       builder: (sheetContext) {
-        final theme = Theme.of(sheetContext);
-        final cs = theme.colorScheme;
-        return SafeArea(
-          child: SizedBox(
-            height: MediaQuery.sizeOf(sheetContext).height * 0.56,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-                  child: Row(
-                    children: [
-                      Icon(Icons.terminal_rounded, size: 18, color: cs.primary),
-                      const SizedBox(width: 8),
-                      Text(
-                        '选择命令',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Divider(height: 1, color: cs.outlineVariant),
-                Expanded(
-                  child: commands.isEmpty
-                      ? ListView(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          children: [
-                            _CommandTile(
-                              title: '/',
-                              description: '插入 slash command 前缀',
-                              icon: Icons.terminal_rounded,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                onInsertPrompt('/');
-                              },
-                            ),
-                            _CommandTile(
-                              title: 'SKILL',
-                              description: '插入 skill 标签模板',
-                              icon: Icons.bolt_outlined,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                onInsertPrompt('<skill></skill> ');
-                              },
-                            ),
-                          ],
-                        )
-                      : ListView.separated(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          itemCount: commands.length,
-                          separatorBuilder: (_, _) => Divider(
-                            height: 1,
-                            indent: 56,
-                            color: cs.outlineVariant.withValues(alpha: 0.55),
-                          ),
-                          itemBuilder: (ctx, i) {
-                            final c = commands[i];
-                            final isSkill = c.source.toLowerCase() == 'skill';
-                            final desc = c.description.trim().isEmpty
-                                ? (isSkill ? '插入 skill 命令' : '插入 slash command')
-                                : c.description;
-                            return _CommandTile(
-                              title: _commandTitle(c),
-                              description: desc,
-                              icon: isSkill
-                                  ? Icons.bolt_outlined
-                                  : Icons.terminal_rounded,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                onInsertPrompt(_commandInsertion(c));
-                              },
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          ),
+        return _CommandSheet(
+          commands: commands,
+          commandTitle: _commandTitle,
+          commandInsertion: _commandInsertion,
+          onInsertPrompt: onInsertPrompt,
         );
       },
+    );
+  }
+}
+
+/// 命令选择面板（带搜索过滤）。
+class _CommandSheet extends StatefulWidget {
+  final List<PiSlashCommandInfo> commands;
+  final String Function(PiSlashCommandInfo) commandTitle;
+  final String Function(PiSlashCommandInfo) commandInsertion;
+  final ValueChanged<String> onInsertPrompt;
+
+  const _CommandSheet({
+    required this.commands,
+    required this.commandTitle,
+    required this.commandInsertion,
+    required this.onInsertPrompt,
+  });
+
+  @override
+  State<_CommandSheet> createState() => _CommandSheetState();
+}
+
+class _CommandSheetState extends State<_CommandSheet> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final q = _query.trim().toLowerCase();
+    final filtered = q.isEmpty
+        ? widget.commands
+        : widget.commands
+              .where(
+                (c) =>
+                    c.name.toLowerCase().contains(q) ||
+                    c.description.toLowerCase().contains(q),
+              )
+              .toList();
+
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.56,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: Row(
+                children: [
+                  Icon(Icons.terminal_rounded, size: 18, color: cs.primary),
+                  const SizedBox(width: 8),
+                  Text(
+                    '选择命令',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (widget.commands.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                child: TextField(
+                  autofocus: false,
+                  onChanged: (v) => setState(() => _query = v),
+                  decoration: InputDecoration(
+                    prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                    hintText: '搜索命令…',
+                    isDense: true,
+                    filled: true,
+                    fillColor: cs.surfaceContainerLow,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+            Divider(height: 1, color: cs.outlineVariant),
+            Expanded(
+              child: widget.commands.isEmpty
+                  ? ListView(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      children: [
+                        _CommandTile(
+                          title: '/',
+                          description: '插入 slash command 前缀',
+                          icon: Icons.terminal_rounded,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            widget.onInsertPrompt('/');
+                          },
+                        ),
+                        _CommandTile(
+                          title: 'SKILL',
+                          description: '插入 skill 标签模板',
+                          icon: Icons.bolt_outlined,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            widget.onInsertPrompt('<skill></skill> ');
+                          },
+                        ),
+                      ],
+                    )
+                  : filtered.isEmpty
+                  ? Center(
+                      child: Text(
+                        '没有匹配的命令',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: cs.onSurface.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: filtered.length,
+                      separatorBuilder: (_, _) => Divider(
+                        height: 1,
+                        indent: 56,
+                        color: cs.outlineVariant.withValues(alpha: 0.55),
+                      ),
+                      itemBuilder: (ctx, i) {
+                        final c = filtered[i];
+                        final isSkill = c.source.toLowerCase() == 'skill';
+                        final desc = c.description.trim().isEmpty
+                            ? (isSkill ? '插入 skill 命令' : '插入 slash command')
+                            : c.description;
+                        return _CommandTile(
+                          title: widget.commandTitle(c),
+                          description: desc,
+                          icon: isSkill
+                              ? Icons.bolt_outlined
+                              : Icons.terminal_rounded,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            widget.onInsertPrompt(widget.commandInsertion(c));
+                          },
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -924,27 +1001,30 @@ class _SendButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 160),
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: enabled ? cs.primary : cs.onSurface.withValues(alpha: 0.08),
-        shape: BoxShape.circle,
-      ),
-      child: Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: enabled ? onTap : null,
-          child: Center(
-            child: Icon(
-              Icons.arrow_upward_rounded,
-              size: 20,
-              color: enabled
-                  ? cs.onPrimary
-                  : cs.onSurface.withValues(alpha: 0.4),
+    return Tooltip(
+      message: '发送',
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: enabled ? cs.primary : cs.onSurface.withValues(alpha: 0.08),
+          shape: BoxShape.circle,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: enabled ? onTap : null,
+            child: Center(
+              child: Icon(
+                Icons.arrow_upward_rounded,
+                size: 20,
+                color: enabled
+                    ? cs.onPrimary
+                    : cs.onSurface.withValues(alpha: 0.4),
+              ),
             ),
           ),
         ),

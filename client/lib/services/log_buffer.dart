@@ -29,18 +29,27 @@ class LogBuffer {
   }
 
   void _onRecord(LogRecord record) {
-    final next = List<LogRecord>.from(records.value)..add(record);
-    if (next.length > capacity) {
-      next.removeRange(0, next.length - capacity);
-    }
-    records.value = next;
+    _append(record);
 
     if (kDebugMode) {
       debugPrint(formatLogRecord(record));
     }
   }
 
+  void _append(LogRecord record) {
+    final next = List<LogRecord>.from(records.value)..add(record);
+    if (next.length > capacity) {
+      next.removeRange(0, next.length - capacity);
+    }
+    records.value = next;
+  }
+
   void clear() {
     records.value = const <LogRecord>[];
+  }
+
+  @visibleForTesting
+  void addForTesting(LogRecord record) {
+    _append(record);
   }
 }

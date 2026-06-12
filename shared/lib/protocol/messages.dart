@@ -111,6 +111,9 @@ abstract final class ProtocolPayloadKeys {
   /// Batched replay events returned from resume.
   static const events = 'events';
 
+  /// Whether a resume response has more replay events after this page.
+  static const hasMore = 'hasMore';
+
   /// Streams that could not be replayed from the requested cursor.
   static const truncatedStreams = 'truncatedStreams';
 

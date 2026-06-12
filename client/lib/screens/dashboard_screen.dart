@@ -1,11 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/node_state.dart';
 import '../providers/node_provider.dart';
+import '../theme/app_tokens.dart';
 import '../utils/text.dart';
 import 'about_screen.dart';
-import 'kanban_screen.dart';
 import 'logs_screen.dart';
 import 'node_projects_screen.dart';
 import 'settings_screen.dart';
@@ -42,6 +45,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _openCreateTask() {
+    HapticFeedback.lightImpact();
     Navigator.of(
       context,
     ).push(MaterialPageRoute(builder: (_) => const TaskCreateScreen()));
@@ -62,6 +66,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
               SliverToBoxAdapter(child: _TopBar(onRefresh: _onRefresh)),
+              const SliverToBoxAdapter(child: _ConnectionBanner()),
               const SliverToBoxAdapter(child: _GreetingHero()),
               const SliverToBoxAdapter(child: SizedBox(height: 12)),
               const SliverToBoxAdapter(child: _NodeCarouselSection()),
@@ -109,10 +114,10 @@ class _TopBar extends StatelessWidget {
               shape: BoxShape.circle,
             ),
             alignment: Alignment.center,
-            child: const Text(
+            child: Text(
               'M',
               style: TextStyle(
-                color: Colors.white,
+                color: cs.onPrimary,
                 fontWeight: FontWeight.w800,
                 fontSize: 14,
               ),
@@ -137,6 +142,104 @@ class _TopBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ─────────────────────────── 全局连接状态条 ────────────────────────────
+
+/// 顶部全局连接状态横幅：仅在「未连接 / 连接中」时显示，已连接时隐藏。
+/// 点击进入设置页排查。区分「未配置 Key」「连接中」「已断开」。
+class _ConnectionBanner extends StatelessWidget {
+  const _ConnectionBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Selector<NodeProvider, (bool, bool, bool)>(
+      selector: (ctx, p) => (p.isConnected, p.isConnecting, p.hasTenantKey),
+      builder: (ctx, data, _) {
+        final (isConnected, isConnecting, hasTenantKey) = data;
+        // 已连接：不打扰。
+        if (isConnected) return const SizedBox.shrink();
+
+        final cs = Theme.of(context).colorScheme;
+        IconData icon;
+        String text;
+        Color color;
+        bool spinning = false;
+
+        if (!hasTenantKey) {
+          icon = Icons.key_off_rounded;
+          text = '未配置租户 Key，点击前往设置';
+          color = cs.error;
+        } else if (isConnecting) {
+          icon = Icons.sync_rounded;
+          text = '正在连接 Hub…';
+          color = cs.secondary;
+          spinning = true;
+        } else {
+          icon = Icons.cloud_off_rounded;
+          text = '已断开连接，点击重试或检查设置';
+          color = cs.error;
+        }
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+          child: Material(
+            color: color.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () {
+                final provider = context.read<NodeProvider>();
+                if (hasTenantKey && !isConnecting) {
+                  provider.connect();
+                }
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                );
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    if (spinning)
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: color,
+                        ),
+                      )
+                    else
+                      Icon(icon, size: 18, color: color),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        text,
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      size: 18,
+                      color: color.withValues(alpha: 0.7),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -178,10 +281,10 @@ class _AppDrawer extends StatelessWidget {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     alignment: Alignment.center,
-                    child: const Text(
+                    child: Text(
                       'M',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: cs.onPrimary,
                         fontSize: 18,
                         fontWeight: FontWeight.w800,
                       ),
@@ -216,11 +319,6 @@ class _AppDrawer extends StatelessWidget {
             ),
             Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.4)),
             const SizedBox(height: 8),
-            _DrawerItem(
-              icon: Icons.view_kanban_rounded,
-              label: 'Kanban',
-              onTap: () => _push(context, const KanbanScreen()),
-            ),
             _DrawerItem(
               icon: Icons.local_fire_department_rounded,
               label: 'Grill Me (需求确认)',
@@ -341,8 +439,30 @@ class _DrawerItem extends StatelessWidget {
   }
 }
 
-class _GreetingHero extends StatelessWidget {
+class _GreetingHero extends StatefulWidget {
   const _GreetingHero();
+
+  @override
+  State<_GreetingHero> createState() => _GreetingHeroState();
+}
+
+class _GreetingHeroState extends State<_GreetingHero> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 每分钟刷新一次，确保跨时段（如午夜、清晨）问候语自动更新。
+    _timer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
 
   String _greetingByHour() {
     final h = DateTime.now().hour;
@@ -446,7 +566,7 @@ class _NodeCarousel extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
             child: Text(
-              '暂无已注册 Node，等待 Hub 上线…',
+              '还没有在线 Node，请在远端启动 Node 设备',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: cs.onSurface.withValues(alpha: 0.55),
               ),
@@ -485,6 +605,7 @@ class _NodeAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final tokens = theme.appTokens;
     final online = node.online;
 
     return SizedBox(
@@ -535,7 +656,7 @@ class _NodeAvatar extends StatelessWidget {
                         width: 12,
                         height: 12,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF4ADE80),
+                          color: tokens.statusRunning,
                           shape: BoxShape.circle,
                           border: Border.all(color: cs.surface, width: 2),
                         ),
@@ -572,10 +693,9 @@ class _RecentTasksSliverList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Selector<NodeProvider, List<TaskState>>(
-      selector: (ctx, p) => p.recentTasks,
-      shouldRebuild: (a, b) =>
-          a.length != b.length || !_taskListShallowEqual(a, b),
+    final tasksListenable = context.read<NodeProvider>().recentTasksListenable;
+    return ValueListenableBuilder<List<TaskState>>(
+      valueListenable: tasksListenable,
       builder: (ctx, tasks, _) {
         if (tasks.isEmpty) {
           return const SliverToBoxAdapter(
@@ -599,21 +719,6 @@ class _RecentTasksSliverList extends StatelessWidget {
       },
     );
   }
-
-  static bool _taskListShallowEqual(List<TaskState> a, List<TaskState> b) {
-    if (a.length != b.length) return false;
-    for (int i = 0; i < a.length; i++) {
-      final ta = a[i];
-      final tb = b[i];
-      if (ta.id != tb.id ||
-          ta.status != tb.status ||
-          ta.progressPercent != tb.progressPercent ||
-          ta.title != tb.title) {
-        return false;
-      }
-    }
-    return true;
-  }
 }
 
 class _RecentTaskCard extends StatelessWidget {
@@ -624,6 +729,7 @@ class _RecentTaskCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final tokens = theme.appTokens;
     final node = context.select<NodeProvider, NodeState?>(
       (p) => p.getNode(task.nodeId),
     );
@@ -631,13 +737,7 @@ class _RecentTaskCard extends StatelessWidget {
         node?.hostname ??
         (task.nodeId.length > 8 ? task.nodeId.substring(0, 8) : task.nodeId);
 
-    final statusColor = switch (task.status) {
-      'running' => const Color(0xFF4ADE80),
-      'waitingDecision' => const Color(0xFFFBBF24),
-      'error' => cs.error,
-      'completed' => cs.onSurface.withValues(alpha: 0.4),
-      _ => cs.onSurface.withValues(alpha: 0.45),
-    };
+    final statusColor = tokens.statusForTask(task.status, cs);
     final statusLabel = switch (task.status) {
       'running' => '运行中',
       'waitingDecision' => '等待决策',
@@ -655,6 +755,7 @@ class _RecentTaskCard extends StatelessWidget {
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: task.id)),
         ),
+        onLongPress: () => _showTaskActions(context, task),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
           child: Column(
@@ -721,14 +822,14 @@ class _RecentTaskCard extends StatelessWidget {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   if (statusLabel.isNotEmpty)
-                    _StatusPill(color: statusColor, label: statusLabel),
-                  _MetaPill(icon: Icons.computer_rounded, label: nodeName),
-                  _MetaPill(
+                    _StatusInline(color: statusColor, label: statusLabel),
+                  _MetaInline(icon: Icons.computer_rounded, label: nodeName),
+                  _MetaInline(
                     icon: Icons.folder_open_rounded,
                     label: _shortPath(task.projectPath),
                   ),
                   if (task.model != null && task.model!.isNotEmpty)
-                    _MetaPill(
+                    _MetaInline(
                       icon: Icons.memory_rounded,
                       label: _shortModel(task.model!),
                     ),
@@ -743,6 +844,18 @@ class _RecentTaskCard extends StatelessWidget {
                     value: task.progressPercent! / 100,
                     backgroundColor: cs.onSurface.withValues(alpha: 0.08),
                   ),
+                ),
+              ],
+              if (task.status == 'waitingDecision') ...[
+                const SizedBox(height: 12),
+                _WaitingActionRow(
+                  onOpen: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => TaskDetailScreen(taskId: task.id),
+                    ),
+                  ),
+                  onRethink: () => _sendRethink(context, task),
+                  onStop: () => _confirmPanic(context, task),
                 ),
               ],
             ],
@@ -777,98 +890,246 @@ class _RecentTaskCard extends StatelessWidget {
           ),
           TextButton(
             onPressed: () {
+              HapticFeedback.heavyImpact();
               context.read<NodeProvider>().sendPanic(
                 task.nodeId,
                 taskId: task.id,
               );
               Navigator.of(ctx).pop();
             },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
             child: const Text('终止'),
           ),
         ],
       ),
     );
   }
+
+  void _sendRethink(BuildContext context, TaskState task) {
+    HapticFeedback.lightImpact();
+    context.read<NodeProvider>().sendComposerMessage(
+      task.id,
+      '请换一种思路继续，先说明当前阻塞点，再给出下一步计划。',
+    );
+  }
+
+  Future<void> _showTaskActions(BuildContext context, TaskState task) async {
+    HapticFeedback.mediumImpact();
+    final cs = Theme.of(context).colorScheme;
+    final action = await showModalBottomSheet<_TaskAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    task.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(sheetContext).textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.chat_bubble_outline_rounded),
+                title: const Text('查看会话'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_TaskAction.openDetail),
+              ),
+              ListTile(
+                leading: const Icon(Icons.receipt_long_rounded),
+                title: const Text('查看日志'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_TaskAction.openLogs),
+              ),
+              if (task.status == 'running')
+                ListTile(
+                  leading: Icon(Icons.stop_circle_rounded, color: cs.error),
+                  title: Text('紧急停止', style: TextStyle(color: cs.error)),
+                  onTap: () => Navigator.of(sheetContext).pop(_TaskAction.stop),
+                ),
+              ListTile(
+                leading: Icon(Icons.delete_outline_rounded, color: cs.error),
+                title: Text('移除本地记录', style: TextStyle(color: cs.error)),
+                onTap: () => Navigator.of(sheetContext).pop(_TaskAction.remove),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (action == null || !context.mounted) return;
+
+    switch (action) {
+      case _TaskAction.openDetail:
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: task.id)),
+        );
+        break;
+      case _TaskAction.openLogs:
+        Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => const LogsScreen()));
+        break;
+      case _TaskAction.stop:
+        _confirmPanic(context, task);
+        break;
+      case _TaskAction.remove:
+        await _confirmRemove(context, task);
+        break;
+    }
+  }
+
+  Future<void> _confirmRemove(BuildContext context, TaskState task) async {
+    final cs = Theme.of(context).colorScheme;
+    final remove =
+        await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('移除会话'),
+            content: Text(
+              '从列表中移除「${task.displayTitle}」？\n（仅清理本地记录，远端会话历史不受影响）',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: TextButton.styleFrom(foregroundColor: cs.error),
+                child: const Text('移除'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!remove || !context.mounted) return;
+    context.read<NodeProvider>().removeTask(task.id);
+  }
 }
+
+enum _TaskAction { openDetail, openLogs, stop, remove }
 
 // ─────────────────────────── 小组件 ────────────────────────────
 
-class _StatusPill extends StatelessWidget {
-  final Color color;
-  final String label;
-  const _StatusPill({required this.color, required this.label});
+class _WaitingActionRow extends StatelessWidget {
+  final VoidCallback onOpen;
+  final VoidCallback onRethink;
+  final VoidCallback onStop;
+
+  const _WaitingActionRow({
+    required this.onOpen,
+    required this.onRethink,
+    required this.onStop,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    final cs = Theme.of(context).colorScheme;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        FilledButton.tonalIcon(
+          onPressed: onOpen,
+          icon: const Icon(Icons.visibility_outlined, size: 16),
+          label: const Text('查看'),
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
           ),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w600,
-              fontSize: 11,
-            ),
+        ),
+        FilledButton.tonalIcon(
+          onPressed: onRethink,
+          icon: const Icon(Icons.auto_fix_high_rounded, size: 16),
+          label: const Text('换思路'),
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
           ),
-        ],
-      ),
+        ),
+        TextButton.icon(
+          onPressed: onStop,
+          icon: const Icon(Icons.stop_circle_outlined, size: 16),
+          label: const Text('停止'),
+          style: TextButton.styleFrom(
+            foregroundColor: cs.error,
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+          ),
+        ),
+      ],
     );
   }
 }
 
-class _MetaPill extends StatelessWidget {
+class _StatusInline extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _StatusInline({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: color,
+            fontWeight: FontWeight.w600,
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MetaInline extends StatelessWidget {
   final IconData icon;
   final String label;
-  const _MetaPill({required this.icon, required this.label});
+  const _MetaInline({required this.icon, required this.label});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerLowest,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: cs.outlineVariant.withValues(alpha: 0.5),
-          width: 0.6,
-        ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 11, color: cs.onSurface.withValues(alpha: 0.5)),
-          const SizedBox(width: 4),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 160),
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: cs.onSurface.withValues(alpha: 0.65),
-                fontSize: 11,
-              ),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 11, color: cs.onSurface.withValues(alpha: 0.5)),
+        const SizedBox(width: 4),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 160),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: cs.onSurface.withValues(alpha: 0.65),
+              fontSize: 11,
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -948,8 +1209,7 @@ class _NewChatFab extends StatelessWidget {
       child: Material(
         color: cs.primary,
         borderRadius: BorderRadius.circular(32),
-        elevation: 6,
-        shadowColor: cs.primary.withValues(alpha: 0.35),
+        elevation: 0,
         child: InkWell(
           borderRadius: BorderRadius.circular(32),
           onTap: onTap,
@@ -958,7 +1218,7 @@ class _NewChatFab extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.edit_rounded, color: Colors.white, size: 18),
+                Icon(Icons.edit_rounded, color: cs.onPrimary, size: 18),
                 const SizedBox(width: 8),
                 Text(
                   '新对话',

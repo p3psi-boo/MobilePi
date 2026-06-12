@@ -18,6 +18,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _urlError;
   String? _keyError;
   bool _saving = false;
+  bool _obscureKey = true;
 
   @override
   void initState() {
@@ -103,9 +104,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cs = theme.colorScheme;
     final currentUrl = context.select<NodeProvider, String>((p) => p.hubUrl);
     final currentKey = context.select<NodeProvider, String>((p) => p.tenantKey);
-    final isConnecting = context.select<NodeProvider, bool>((p) => p.isConnecting);
-    final isConnected = context.select<NodeProvider, bool>((p) => p.isConnected);
-    final hasTenantKey = context.select<NodeProvider, bool>((p) => p.hasTenantKey);
+    final isConnecting = context.select<NodeProvider, bool>(
+      (p) => p.isConnecting,
+    );
+    final isConnected = context.select<NodeProvider, bool>(
+      (p) => p.isConnected,
+    );
+    final hasTenantKey = context.select<NodeProvider, bool>(
+      (p) => p.hasTenantKey,
+    );
     final defaultUrl = WebSocketService.defaultHubUrl();
 
     return Scaffold(
@@ -158,11 +165,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
             controller: _keyController,
             enabled: !_saving,
             autocorrect: false,
-            obscureText: true,
+            obscureText: _obscureKey,
+            enableSuggestions: false,
             decoration: InputDecoration(
               labelText: '租户 Key',
               hintText: '自定义 Key',
               errorText: _keyError,
+              suffixIcon: IconButton(
+                tooltip: _obscureKey ? '显示' : '隐藏',
+                icon: Icon(
+                  _obscureKey
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                  size: 20,
+                ),
+                onPressed: () => setState(() => _obscureKey = !_obscureKey),
+              ),
               filled: true,
               fillColor: cs.surfaceContainerLow,
               border: OutlineInputBorder(
@@ -195,12 +213,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               FilledButton.icon(
                 onPressed: _saving ? null : _save,
                 icon: _saving
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 14,
                         height: 14,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: Colors.white,
+                          color: cs.onPrimary,
                         ),
                       )
                     : const Icon(Icons.check_rounded, size: 18),

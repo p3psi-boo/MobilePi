@@ -58,22 +58,87 @@ void main() {
       expect(instance.isRunning, isTrue);
     });
 
-    test('parses session message usage when present and keeps null when absent', () {
-      final withUsage = PiSessionMessageInfo.fromJson({
-        'role': 'assistant',
-        'text': 'done',
-        'usage': {'input_tokens': 10, 'output_tokens': 20, 'total_tokens': 30},
+    test(
+      'parses session message usage when present and keeps null when absent',
+      () {
+        final withUsage = PiSessionMessageInfo.fromJson({
+          'role': 'assistant',
+          'text': 'done',
+          'sourceIndex': 7,
+          'usage': {
+            'input_tokens': 10,
+            'output_tokens': 20,
+            'total_tokens': 30,
+          },
+        });
+        final withoutUsage = PiSessionMessageInfo.fromJson({
+          'role': 'assistant',
+          'text': 'done',
+        });
+
+        expect(withUsage.usage, isNotNull);
+        expect(withUsage.usage!.input, equals(10));
+        expect(withUsage.usage!.output, equals(20));
+        expect(withUsage.usage!.totalTokens, equals(30));
+        expect(withUsage.sourceIndex, 7);
+        expect(withUsage.toJson()['sourceIndex'], 7);
+        expect(withoutUsage.usage, isNull);
+      },
+    );
+
+    test('preserves tool part ids and input payloads', () {
+      final call = MessagePart.fromJson({
+        'type': 'toolCall',
+        'name': 'Read',
+        'id': 'call-1',
+        'input': {'path': 'README.md'},
       });
-      final withoutUsage = PiSessionMessageInfo.fromJson({
-        'role': 'assistant',
+      final result = MessagePart.fromJson({
+        'type': 'toolResult',
+        'name': 'Read',
+        'id': 'call-1',
+        'status': '成功',
         'text': 'done',
       });
 
-      expect(withUsage.usage, isNotNull);
-      expect(withUsage.usage!.input, equals(10));
-      expect(withUsage.usage!.output, equals(20));
-      expect(withUsage.usage!.totalTokens, equals(30));
-      expect(withoutUsage.usage, isNull);
+      expect(call.type, MessagePartType.toolCall);
+      expect(call.id, 'call-1');
+      expect(call.input, {'path': 'README.md'});
+      expect(call.toJson()['id'], 'call-1');
+      expect(call.toJson()['input'], {'path': 'README.md'});
+
+      expect(result.type, MessagePartType.toolResult);
+      expect(result.id, 'call-1');
+      expect(result.toJson()['id'], 'call-1');
+    });
+
+    test('keeps session messages whose content lives only in parts', () {
+      final session = PiSessionInfo.fromJson({
+        'path': '/tmp/session.jsonl',
+        'id': 'session-1',
+        'cwd': '/repo',
+        'messages': [
+          {
+            'role': 'assistant',
+            'text': '',
+            'parts': [
+              {
+                'type': 'toolCall',
+                'name': 'Read',
+                'id': 'call-1',
+                'input': {'path': 'README.md'},
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(session.messages, hasLength(1));
+      expect(
+        session.messages.single.parts.single.type,
+        MessagePartType.toolCall,
+      );
+      expect(session.messages.single.parts.single.id, 'call-1');
     });
   });
 }

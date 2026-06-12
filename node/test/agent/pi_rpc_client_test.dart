@@ -65,47 +65,69 @@ void main() {
     });
   });
 
-  group('PiRpcClient Sandboxing', () {
-    test('wraps executable and arguments properly based on parameters', () async {
-      final isMac = Platform.isMacOS;
-      final isLinux = Platform.isLinux;
+  group('PiRpcClient line parsing', () {
+    test('malformed JSON line is logged and later events still flow', () async {
+      final client = PiRpcClient();
+      final events = <Map<String, dynamic>>[];
+      final sub = client.events.listen(events.add);
 
-      if (isMac) {
-        final client = PiRpcClient(
-          executable: 'pi-nonexistent',
-          args: ['--mode', 'rpc'],
-          sandboxMode: 'macos',
-        );
-        try {
-          await client.start();
-        } catch (e) {
-          expect(e.toString(), contains('sandbox-exec'));
-        }
-      } else if (isLinux) {
-        final client = PiRpcClient(
-          executable: 'pi-nonexistent',
-          args: ['--mode', 'rpc'],
-          sandboxMode: 'systemd',
-          cpuLimit: '40%',
-          memLimit: '1G',
-        );
-        try {
-          await client.start();
-        } catch (e) {
-          expect(e.toString(), contains('systemd-run'));
-        }
-      } else {
-        final client = PiRpcClient(
-          executable: 'pi-invalid',
-          args: ['--mode', 'rpc'],
-          sandboxMode: 'none',
-        );
-        try {
-          await client.start();
-        } catch (e) {
-          expect(e.toString(), contains('pi-invalid'));
-        }
-      }
+      client.handleLineForTesting('{"type":');
+      client.handleLineForTesting('{"type":"event","name":"ready"}');
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events, hasLength(1));
+      expect(events.single['type'], 'event');
+      expect(events.single['name'], 'ready');
+
+      await sub.cancel();
     });
+  });
+
+  group('PiRpcClient Sandboxing', () {
+    test(
+      'wraps executable and arguments properly based on parameters',
+      () async {
+        final isMac = Platform.isMacOS;
+        final isLinux = Platform.isLinux;
+
+        if (isMac) {
+          final client = PiRpcClient(
+            executable: 'pi-nonexistent',
+            args: ['--mode', 'rpc'],
+            sandboxMode: 'macos',
+          );
+          try {
+            await client.start();
+          } catch (e) {
+            expect(e.toString(), contains('sandbox-exec'));
+          }
+        } else if (isLinux) {
+          final client = PiRpcClient(
+            executable: 'pi-nonexistent',
+            args: ['--mode', 'rpc'],
+            sandboxMode: 'systemd',
+            cpuLimit: '40%',
+            memLimit: '1G',
+          );
+          try {
+            await client.start();
+          } catch (e) {
+            expect(e.toString(), contains('systemd-run'));
+          }
+        } else {
+          final client = PiRpcClient(
+            executable: 'pi-invalid',
+            args: ['--mode', 'rpc'],
+            sandboxMode: 'none',
+          );
+          try {
+            await client.start();
+          } catch (e) {
+            expect(e.toString(), contains('pi-invalid'));
+          }
+        }
+      },
+    );
   });
 }

@@ -24,20 +24,17 @@ class AboutScreen extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: cs.primary,
                     borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: cs.primary.withValues(alpha: 0.3),
-                        blurRadius: 16,
-                        offset: const Offset(0, 6),
-                      ),
-                    ],
+                    border: Border.all(
+                      color: cs.onPrimary.withValues(alpha: 0.22),
+                      width: 1,
+                    ),
                   ),
                   alignment: Alignment.center,
-                  child: const Text(
+                  child: Text(
                     'M',
                     style: TextStyle(
                       fontSize: 38,
-                      color: Colors.white,
+                      color: cs.onPrimary,
                       fontWeight: FontWeight.w800,
                     ),
                   ),

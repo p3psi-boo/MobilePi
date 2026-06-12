@@ -1,13 +1,24 @@
 import 'dart:async';
 
+import 'package:drift/drift.dart' hide isNotNull, isNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobilepi_client/models/node_state.dart';
 import 'package:mobilepi_client/providers/node_provider.dart';
+import 'package:mobilepi_client/services/session_cache.dart';
 import 'package:mobilepi_client/services/websocket_service.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  setUpAll(() {
+    driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+  });
+
   group('NodeProvider sync', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+    });
+
     test('syncs Pi state and messages without replay cursors', () async {
       final ws = FakeWebSocketService();
       final provider = NodeProvider(webSocketService: ws);
@@ -35,7 +46,9 @@ void main() {
       ws.emitConnection(true);
       await Future<void>.delayed(Duration.zero);
       provider.refresh();
+      await Future<void>.delayed(Duration.zero);
 
+      expect(ws.forceReconnectCount, 1);
       expect(ws.helloPayloads, hasLength(2));
       expect(ws.resumePayloads.map((p) => p['nodeId']), ['node-1', 'node-1']);
 
@@ -141,6 +154,221 @@ void main() {
       },
     );
 
+    test('preserves streaming output beyond the render window', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+      final first = 'a' * 16000;
+      final second = 'b' * 16000;
+
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-long',
+        seq: 1,
+        delta: first,
+      );
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-long',
+        seq: 2,
+        delta: second,
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      final task = provider.getTask('task-long');
+      expect(task?.streamingText, '$first$second');
+      expect(task?.streamingText?.length, 32000);
+      expect(task?.streamingParts.single.text, '$first$second');
+
+      provider.dispose();
+    });
+
+    test('coalesces streaming task listenable notifications', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+
+      emitNodeSummary(ws, 'sync-node-fixed-cadence', {
+        ProtocolPayloadKeys.nodeId: 'node-1',
+        ProtocolPayloadKeys.hostname: 'macbook',
+        ProtocolPayloadKeys.platform: 'macos',
+        ProtocolPayloadKeys.agents: ['pi'],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      provider.sendTaskCommand('initial prompt', nodeId: 'node-1');
+      final taskId = ws.taskCreateRequests.single['taskId'] as String;
+      final taskListenable = provider.taskListenable(taskId);
+      var updateCount = 0;
+      taskListenable.addListener(() {
+        updateCount++;
+      });
+
+      emitTaskDelta(ws, nodeId: 'node-1', taskId: taskId, seq: 1, delta: 'a');
+      emitTaskDelta(ws, nodeId: 'node-1', taskId: taskId, seq: 2, delta: 'b');
+      await Future<void>.delayed(Duration.zero);
+      expect(updateCount, 0);
+      expect(provider.getTask(taskId)?.streamingText, 'ab');
+
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      expect(updateCount, 1);
+      expect(taskListenable.value?.streamingText, 'ab');
+
+      provider.dispose();
+    });
+
+    test(
+      'streaming incremental events do not notify global listeners',
+      () async {
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(webSocketService: ws);
+
+        emitNodeSummary(ws, 'sync-node-local-only-streaming', {
+          ProtocolPayloadKeys.nodeId: 'node-1',
+          ProtocolPayloadKeys.hostname: 'macbook',
+          ProtocolPayloadKeys.platform: 'macos',
+          ProtocolPayloadKeys.agents: ['pi'],
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        provider.sendTaskCommand('initial prompt', nodeId: 'node-1');
+        final taskId = ws.taskCreateRequests.single['taskId'] as String;
+        var globalUpdateCount = 0;
+        provider.addListener(() {
+          globalUpdateCount++;
+        });
+
+        emitTaskDelta(ws, nodeId: 'node-1', taskId: taskId, seq: 1, delta: 'a');
+        emitToolCall(
+          ws,
+          nodeId: 'node-1',
+          taskId: taskId,
+          seq: 2,
+          name: 'Read',
+        );
+        emitToolResult(
+          ws,
+          nodeId: 'node-1',
+          taskId: taskId,
+          seq: 3,
+          name: 'Read',
+        );
+        emitThinkingBoundary(
+          ws,
+          nodeId: 'node-1',
+          taskId: taskId,
+          seq: 4,
+          boundary: 'start',
+        );
+        emitTaskProgress(
+          ws,
+          nodeId: 'node-1',
+          taskId: taskId,
+          seq: 5,
+          percent: 42,
+        );
+
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+
+        expect(globalUpdateCount, 0);
+        expect(provider.getTask(taskId)?.streamingText, 'a');
+        expect(provider.getTask(taskId)?.streamingParts.length, 3);
+        expect(provider.getTask(taskId)?.progressPercent, 42);
+
+        provider.dispose();
+      },
+    );
+
+    test('task listenable updates only for its task', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+      final taskListenable = provider.taskListenable('task-1');
+      var updateCount = 0;
+      taskListenable.addListener(() {
+        updateCount++;
+      });
+
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-1',
+        seq: 1,
+        delta: 'hello',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(updateCount, 1);
+      expect(taskListenable.value?.streamingText, 'hello');
+
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-2',
+        seq: 1,
+        delta: 'unrelated',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(updateCount, 1);
+      expect(taskListenable.value?.streamingText, 'hello');
+
+      provider.removeTask('task-1');
+
+      expect(updateCount, 2);
+      expect(taskListenable.value, isNull);
+
+      provider.dispose();
+    });
+
+    test('recent tasks listenable ignores streaming-only deltas', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+      var recentUpdateCount = 0;
+      provider.recentTasksListenable.addListener(() {
+        recentUpdateCount++;
+      });
+
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-1',
+        seq: 1,
+        delta: 'hello',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(recentUpdateCount, 1);
+      expect(provider.recentTasks.single.id, 'task-1');
+
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-1',
+        seq: 2,
+        delta: ' world',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(recentUpdateCount, 1);
+      expect(provider.getTask('task-1')?.streamingText, 'hello world');
+
+      emitTaskProgress(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-1',
+        seq: 3,
+        percent: 42,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(recentUpdateCount, 2);
+      expect(provider.recentTasks.single.progressPercent, 42);
+
+      provider.dispose();
+    });
+
     test('protocol events advance cursor and ignore duplicate seq', () async {
       final ws = FakeWebSocketService();
       final provider = NodeProvider(webSocketService: ws);
@@ -184,6 +412,139 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 120));
 
       expect(provider.getTask('task-1')?.streamingText, equals('hello world'));
+
+      provider.dispose();
+    });
+
+    test(
+      'resume applies truncated stream snapshot before replay events',
+      () async {
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(webSocketService: ws);
+
+        emitNodeSummary(ws, 'sync-node-truncated', {
+          ProtocolPayloadKeys.nodeId: 'node-1',
+          ProtocolPayloadKeys.hostname: 'macbook',
+          ProtocolPayloadKeys.platform: 'macos',
+          ProtocolPayloadKeys.agents: ['pi'],
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        ws.emitMessage(
+          MobilePiMessage(
+            messageId: 'resume-truncated',
+            from: 'node:node-1',
+            to: 'client',
+            type: MessageType.response,
+            payload: {
+              ProtocolPayloadKeys.responseTo: 'resume-truncated',
+              ProtocolPayloadKeys.truncatedStreams: [
+                {
+                  ProtocolPayloadKeys.streamId: 'task:task-1',
+                  'requestedSeq': 0,
+                  'latestSeq': 5,
+                  'snapshot': {
+                    ProtocolPayloadKeys.streamId: 'task:task-1',
+                    ProtocolPayloadKeys.seq: 5,
+                    ProtocolPayloadKeys.eventType: 'task.snapshot',
+                    ProtocolPayloadKeys.eventPayload: {
+                      'taskId': 'task-1',
+                      'status': 'completed',
+                      ProtocolPayloadKeys.title: 'Recovered task',
+                      ProtocolPayloadKeys.projectPath: '/repo',
+                    },
+                    ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:05.000Z',
+                  },
+                },
+              ],
+              ProtocolPayloadKeys.events: [
+                {
+                  ProtocolPayloadKeys.streamId: 'task:task-1',
+                  ProtocolPayloadKeys.seq: 3,
+                  ProtocolPayloadKeys.eventType: 'task.output.delta',
+                  ProtocolPayloadKeys.eventPayload: {
+                    'taskId': 'task-1',
+                    'status': 'running',
+                    'streamingDelta': 'stale',
+                  },
+                  ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:03.000Z',
+                },
+              ],
+            },
+            timestamp: DateTime.utc(2026, 1, 1),
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        final task = provider.getTask('task-1');
+        expect(task?.status, 'completed');
+        expect(task?.title, 'Recovered task');
+        expect(task?.projectPath, '/repo');
+        expect(task?.streamingText, isNull);
+
+        ws.emitConnection(true);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          ws.resumePayloads.last['cursors'],
+          containsPair('task:task-1', 5),
+        );
+
+        provider.dispose();
+      },
+    );
+
+    test('resume hasMore requests next page with advanced cursors', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+
+      ws.emitMessage(
+        MobilePiMessage(
+          messageId: 'resume-page-1',
+          from: 'node:node-1',
+          to: 'client',
+          type: MessageType.response,
+          payload: {
+            ProtocolPayloadKeys.responseTo: 'resume-page-1',
+            ProtocolPayloadKeys.hasMore: true,
+            ProtocolPayloadKeys.events: [
+              {
+                ProtocolPayloadKeys.streamId: 'task:task-1',
+                ProtocolPayloadKeys.seq: 1,
+                ProtocolPayloadKeys.eventType: 'task.output.delta',
+                ProtocolPayloadKeys.eventPayload: {
+                  'taskId': 'task-1',
+                  'status': 'running',
+                  'streamingDelta': 'hello',
+                },
+                ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:01.000Z',
+              },
+              {
+                ProtocolPayloadKeys.streamId: 'task:task-1',
+                ProtocolPayloadKeys.seq: 2,
+                ProtocolPayloadKeys.eventType: 'task.output.delta',
+                ProtocolPayloadKeys.eventPayload: {
+                  'taskId': 'task-1',
+                  'status': 'running',
+                  'streamingDelta': ' world',
+                },
+                ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:02.000Z',
+              },
+            ],
+          },
+          timestamp: DateTime.utc(2026, 1, 1),
+        ),
+      );
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.getTask('task-1')?.streamingText, 'hello world');
+      expect(ws.resumePayloads, hasLength(1));
+      expect(ws.resumePayloads.single['nodeId'], 'node-1');
+      expect(
+        ws.resumePayloads.single['cursors'],
+        containsPair('task:task-1', 2),
+      );
 
       provider.dispose();
     });
@@ -238,6 +599,77 @@ void main() {
       },
     );
 
+    test(
+      'coalesces running tool and thinking events into one notify',
+      () async {
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(webSocketService: ws);
+        var notifyCount = 0;
+        var taskNotifyCount = 0;
+        provider.addListener(() {
+          notifyCount++;
+        });
+
+        emitTaskDelta(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 1,
+          delta: 'hello',
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        expect(notifyCount, 1);
+        final taskListenable = provider.taskListenable('task-1');
+        taskListenable.addListener(() {
+          taskNotifyCount++;
+        });
+
+        emitToolCall(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 2,
+          name: 'Read',
+        );
+        emitToolResult(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 3,
+          name: 'Read',
+        );
+        emitThinkingBoundary(
+          ws,
+          nodeId: 'node-1',
+          taskId: 'task-1',
+          seq: 4,
+          boundary: 'start',
+        );
+
+        await Future<void>.delayed(Duration.zero);
+        expect(notifyCount, 1);
+        expect(taskNotifyCount, 0);
+
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        expect(notifyCount, 1);
+        expect(taskNotifyCount, 1);
+        final task = provider.getTask('task-1');
+        expect(task?.isThinking, isTrue);
+        expect(task?.streamingParts, hasLength(3));
+        expect(task?.streamingParts[0].type, MessagePartType.text);
+        expect(task?.streamingParts[0].text, 'hello');
+        expect(task?.streamingParts[1].type, MessagePartType.toolCall);
+        expect(task?.streamingParts[1].name, 'Read');
+        expect(task?.streamingParts[1].id, 'call-2');
+        expect(task?.streamingParts[2].type, MessagePartType.toolResult);
+        expect(task?.streamingParts[2].name, 'Read');
+        expect(task?.streamingParts[2].id, 'call-2');
+        expect(task?.streamingParts[2].text, 'ok');
+
+        provider.dispose();
+      },
+    );
+
     test('connects to the configured Hub URL without daemon editing', () async {
       final ws = FakeWebSocketService();
       final provider = NodeProvider(webSocketService: ws);
@@ -249,6 +681,97 @@ void main() {
       expect(provider.tenantKey, equals('tenant-a'));
       expect(ws.hubUrl, equals('ws://localhost:8080/ws'));
       expect(ws.connectCount, equals(1));
+
+      provider.dispose();
+    });
+
+    test(
+      'hydrates recent tasks from session cache before network sync',
+      () async {
+        final cache = SessionCache.inMemory();
+        await cache.saveSnapshots([
+          SessionSnapshot(
+            taskId: 'cached-task',
+            nodeId: 'node-1',
+            updatedAt: DateTime.parse('2026-01-02T00:00:00Z'),
+            payload: {
+              'id': 'cached-task',
+              'nodeId': 'node-1',
+              'projectId': 'node-1::/repo',
+              'projectPath': '/repo',
+              'sessionId': 'session-1',
+              'sessionPath': '/tmp/session.jsonl',
+              'title': 'cached title',
+              'status': 'history',
+              'createdAt': '2026-01-02T00:00:00.000Z',
+              'messages': [
+                {
+                  'role': 'user',
+                  'text': 'cached prompt',
+                  'timestamp': '2026-01-02T00:00:00.000Z',
+                },
+                {
+                  'role': 'assistant',
+                  'text': '',
+                  'parts': [
+                    {'type': 'text', 'text': 'cached answer'},
+                  ],
+                },
+              ],
+            },
+          ),
+        ]);
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(
+          webSocketService: ws,
+          sessionCache: cache,
+        );
+
+        await provider.loadSettings();
+
+        expect(provider.recentTasks, hasLength(1));
+        expect(provider.recentTasks.single.id, 'cached-task');
+        expect(provider.recentTasks.single.displayTitle, 'cached prompt');
+        expect(
+          provider.recentTasks.single.messages.last.structuredPreviewText,
+          'cached answer',
+        );
+
+        provider.dispose();
+      },
+    );
+
+    test('persists optimistic task snapshots into session cache', () async {
+      final cache = SessionCache.inMemory();
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws, sessionCache: cache);
+
+      emitNodeSummary(ws, 'sync-node-cache-save', {
+        ProtocolPayloadKeys.nodeId: 'node-1',
+        ProtocolPayloadKeys.hostname: 'macbook',
+        ProtocolPayloadKeys.platform: 'macos',
+        ProtocolPayloadKeys.agents: ['pi'],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      provider.sendTaskCommand(
+        'cache this prompt',
+        nodeId: 'node-1',
+        projectId: 'node-1::/repo',
+        projectPath: '/repo',
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+
+      final snapshots = await cache.loadRecent();
+      expect(snapshots, hasLength(1));
+      final payload = snapshots.single.payload;
+      expect(payload['title'], 'cache this prompt');
+      expect(payload['projectPath'], '/repo');
+      expect(payload['status'], 'running');
+      final messages = payload['messages'] as List<dynamic>;
+      expect(messages.single['role'], 'user');
+      expect(messages.single['text'], 'cache this prompt');
 
       provider.dispose();
     });
@@ -270,6 +793,45 @@ void main() {
       expect(provider.hasTenantKey, isTrue);
       expect(provider.tenantKey, 'tenant-a');
       expect(ws.connectCount, equals(1));
+
+      provider.dispose();
+    });
+
+    test('foreground resume forces reconnect and resyncs cursors', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+
+      emitNodeSummary(ws, 'sync-node-resume', {
+        ProtocolPayloadKeys.nodeId: 'node-1',
+        ProtocolPayloadKeys.hostname: 'macbook',
+        ProtocolPayloadKeys.platform: 'macos',
+        ProtocolPayloadKeys.agents: ['pi'],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      emitTaskDelta(
+        ws,
+        nodeId: 'node-1',
+        taskId: 'task-1',
+        seq: 1,
+        delta: 'hello',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      ws.helloPayloads.clear();
+      ws.resumePayloads.clear();
+
+      provider.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(ws.forceReconnectCount, 1);
+      expect(ws.helloPayloads, hasLength(1));
+      expect(ws.resumePayloads, hasLength(1));
+      expect(ws.resumePayloads.single['nodeId'], 'node-1');
+      expect(
+        ws.resumePayloads.single['cursors'],
+        containsPair('task:task-1', 1),
+      );
 
       provider.dispose();
     });
@@ -401,6 +963,198 @@ void main() {
 
       provider.dispose();
     });
+
+    test('composer message steers running task automatically', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+
+      emitNodeSummary(ws, 'sync-node-composer-steer', {
+        ProtocolPayloadKeys.nodeId: 'node-1',
+        ProtocolPayloadKeys.hostname: 'macbook',
+        ProtocolPayloadKeys.platform: 'macos',
+        ProtocolPayloadKeys.agents: ['pi'],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      provider.sendTaskCommand('initial prompt', nodeId: 'node-1');
+      final taskId = ws.taskCreateRequests.single['taskId'] as String;
+
+      provider.sendComposerMessage(taskId, 'change direction');
+
+      expect(ws.steerRequests.single['taskId'], equals(taskId));
+      expect(ws.steerRequests.single['message'], equals('change direction'));
+      expect(ws.followUpRequests, isEmpty);
+      expect(
+        provider.getTask(taskId)?.messages.map((message) => message.text),
+        ['initial prompt', 'change direction'],
+      );
+
+      provider.dispose();
+    });
+
+    test(
+      'composer message steers waiting decision task automatically',
+      () async {
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(webSocketService: ws);
+
+        emitNodeSummary(ws, 'sync-node-composer-waiting', {
+          ProtocolPayloadKeys.nodeId: 'node-1',
+          ProtocolPayloadKeys.hostname: 'macbook',
+          ProtocolPayloadKeys.platform: 'macos',
+          ProtocolPayloadKeys.agents: ['pi'],
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        provider.sendTaskCommand('initial prompt', nodeId: 'node-1');
+        final taskId = ws.taskCreateRequests.single['taskId'] as String;
+        ws.emitMessage(
+          MobilePiMessage(
+            messageId: 'waiting-event',
+            from: 'node:node-1',
+            to: 'client',
+            type: MessageType.event,
+            payload: {
+              ProtocolPayloadKeys.streamId: 'task:$taskId',
+              ProtocolPayloadKeys.seq: 1,
+              ProtocolPayloadKeys.eventType: 'task.status',
+              ProtocolPayloadKeys.eventPayload: {
+                'taskId': taskId,
+                'status': 'waitingDecision',
+              },
+              ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:00.000Z',
+            },
+            timestamp: DateTime.utc(2026, 1, 1),
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        provider.sendComposerMessage(taskId, 'try another approach');
+
+        expect(ws.steerRequests.single['taskId'], equals(taskId));
+        expect(
+          ws.steerRequests.single['message'],
+          equals('try another approach'),
+        );
+        expect(ws.followUpRequests, isEmpty);
+        expect(provider.getTask(taskId)?.status, equals('waitingDecision'));
+
+        provider.dispose();
+      },
+    );
+
+    test(
+      'composer message follows up non-running session automatically',
+      () async {
+        final ws = FakeWebSocketService();
+        final provider = NodeProvider(webSocketService: ws);
+
+        emitNodeSummary(ws, 'sync-node-composer-followup', {
+          ProtocolPayloadKeys.nodeId: 'node-1',
+          ProtocolPayloadKeys.hostname: 'macbook',
+          ProtocolPayloadKeys.platform: 'macos',
+          ProtocolPayloadKeys.agents: ['pi'],
+          ProtocolPayloadKeys.piSessions: [
+            {
+              'path': '/tmp/session.jsonl',
+              'id': 'session-1',
+              'cwd': '/repo',
+              'name': 'finished task',
+              'modified': '2026-01-02T00:00:00.000Z',
+              'messages': [
+                {'role': 'user', 'text': 'initial prompt'},
+              ],
+            },
+          ],
+        });
+        await Future<void>.delayed(Duration.zero);
+        final taskId = provider.recentTasks.single.id;
+
+        provider.sendComposerMessage(taskId, 'continue with tests');
+
+        expect(ws.followUpRequests.single['taskId'], equals(taskId));
+        expect(
+          ws.followUpRequests.single['message'],
+          equals('continue with tests'),
+        );
+        expect(ws.steerRequests, isEmpty);
+        expect(
+          provider.getTask(taskId)?.messages.map((message) => message.text),
+          ['initial prompt', 'continue with tests'],
+        );
+
+        provider.dispose();
+      },
+    );
+
+    test('session pagination deduplicates by sourceIndex', () async {
+      final ws = FakeWebSocketService();
+      final provider = NodeProvider(webSocketService: ws);
+
+      emitNodeSummary(ws, 'sync-node-source-index', {
+        ProtocolPayloadKeys.nodeId: 'node-1',
+        ProtocolPayloadKeys.hostname: 'macbook',
+        ProtocolPayloadKeys.platform: 'macos',
+        ProtocolPayloadKeys.agents: ['pi'],
+        ProtocolPayloadKeys.piSessions: [
+          {
+            'path': '/tmp/session-source-index.jsonl',
+            'id': 'session-source-index',
+            'cwd': '/repo',
+            'name': 'source index session',
+            'modified': '2026-01-02T00:00:00.000Z',
+            'messageCount': 11,
+            'messages': [
+              {
+                'role': 'assistant',
+                'text': '',
+                'sourceIndex': 10,
+                'parts': [
+                  {'type': 'toolCall', 'name': 'Read', 'id': 'call-10'},
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      final taskId = provider.recentTasks.single.id;
+
+      ws.emitMessage(
+        MobilePiMessage(
+          messageId: 'messages-source-index',
+          from: 'node:node-1',
+          to: 'client',
+          type: MessageType.response,
+          payload: {
+            ProtocolPayloadKeys.responseTo: 'messages-source-index',
+            'sessionPath': '/tmp/session-source-index.jsonl',
+            'totalCount': 11,
+            'nextBeforeIndex': 9,
+            'messages': [
+              {'role': 'user', 'text': 'older prompt', 'sourceIndex': 9},
+              {
+                'role': 'assistant',
+                'text': '',
+                'sourceIndex': 10,
+                'parts': [
+                  {'type': 'toolCall', 'name': 'Read', 'id': 'call-10'},
+                ],
+              },
+            ],
+          },
+          timestamp: DateTime.utc(2026, 1, 1),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final messages = provider.getTask(taskId)?.messages;
+      expect(messages, hasLength(2));
+      expect(messages?.map((message) => message.sourceIndex), [9, 10]);
+      expect(messages?.first.text, 'older prompt');
+
+      provider.dispose();
+    });
   });
 
   group('WebSocketService Hub URL normalization', () {
@@ -479,6 +1233,35 @@ void emitTaskDelta(
   );
 }
 
+void emitTaskProgress(
+  FakeWebSocketService ws, {
+  required String nodeId,
+  required String taskId,
+  required int seq,
+  required int percent,
+}) {
+  ws.emitMessage(
+    MobilePiMessage(
+      messageId: 'event-$seq-progress',
+      from: 'node:$nodeId',
+      to: 'client',
+      type: MessageType.event,
+      payload: {
+        ProtocolPayloadKeys.streamId: 'task:$taskId',
+        ProtocolPayloadKeys.seq: seq,
+        ProtocolPayloadKeys.eventType: 'task.progress',
+        ProtocolPayloadKeys.eventPayload: {
+          'taskId': taskId,
+          'status': 'running',
+          'percent': percent,
+        },
+        ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      timestamp: DateTime.utc(2026, 1, 1),
+    ),
+  );
+}
+
 void emitThinkingBoundary(
   FakeWebSocketService ws, {
   required String nodeId,
@@ -508,6 +1291,68 @@ void emitThinkingBoundary(
   );
 }
 
+void emitToolCall(
+  FakeWebSocketService ws, {
+  required String nodeId,
+  required String taskId,
+  required int seq,
+  required String name,
+}) {
+  ws.emitMessage(
+    MobilePiMessage(
+      messageId: 'event-$seq-tool-call',
+      from: 'node:$nodeId',
+      to: 'client',
+      type: MessageType.event,
+      payload: {
+        ProtocolPayloadKeys.streamId: 'task:$taskId',
+        ProtocolPayloadKeys.seq: seq,
+        ProtocolPayloadKeys.eventType: 'task.output.delta',
+        ProtocolPayloadKeys.eventPayload: {
+          'taskId': taskId,
+          'status': 'running',
+          ProtocolPayloadKeys.toolCall: {'id': 'call-$seq', 'name': name},
+        },
+        ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      timestamp: DateTime.utc(2026, 1, 1),
+    ),
+  );
+}
+
+void emitToolResult(
+  FakeWebSocketService ws, {
+  required String nodeId,
+  required String taskId,
+  required int seq,
+  required String name,
+}) {
+  ws.emitMessage(
+    MobilePiMessage(
+      messageId: 'event-$seq-tool-result',
+      from: 'node:$nodeId',
+      to: 'client',
+      type: MessageType.event,
+      payload: {
+        ProtocolPayloadKeys.streamId: 'task:$taskId',
+        ProtocolPayloadKeys.seq: seq,
+        ProtocolPayloadKeys.eventType: 'task.output.delta',
+        ProtocolPayloadKeys.eventPayload: {
+          'taskId': taskId,
+          'status': 'running',
+          ProtocolPayloadKeys.toolResult: {
+            'id': 'call-${seq - 1}',
+            'name': name,
+            'text': 'ok',
+          },
+        },
+        ProtocolPayloadKeys.createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      timestamp: DateTime.utc(2026, 1, 1),
+    ),
+  );
+}
+
 class FakeWebSocketService extends WebSocketService {
   final StreamController<MobilePiMessage> _messages =
       StreamController<MobilePiMessage>.broadcast();
@@ -523,6 +1368,7 @@ class FakeWebSocketService extends WebSocketService {
   String _tenantKey;
   int connectCount = 0;
   int disconnectCount = 0;
+  int forceReconnectCount = 0;
 
   FakeWebSocketService({String initialTenantKey = 'tenant-a'})
     : _tenantKey = initialTenantKey;
@@ -566,6 +1412,13 @@ class FakeWebSocketService extends WebSocketService {
     disconnectCount++;
     _connected = false;
     emitConnection(false);
+  }
+
+  @override
+  void forceReconnect() {
+    forceReconnectCount++;
+    _connected = false;
+    connect();
   }
 
   @override

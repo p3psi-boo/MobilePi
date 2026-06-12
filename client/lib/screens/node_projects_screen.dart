@@ -60,7 +60,7 @@ class NodeProjectsScreen extends StatelessWidget {
         onPressed: () => _openProjectPicker(context),
         backgroundColor: cs.primary,
         foregroundColor: cs.onPrimary,
-        elevation: 4,
+        elevation: 0,
         icon: const Icon(Icons.create_new_folder_rounded),
         label: const Text(
           '添加项目',

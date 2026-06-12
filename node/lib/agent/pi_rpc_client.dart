@@ -48,13 +48,23 @@ class PiRpcClient {
     var exec = executable;
     var execArgs = List<String>.from(args);
 
-    final mode = (sandboxMode ?? Platform.environment['MOBILE_PI_SANDBOX_MODE'])?.trim().toLowerCase() ?? 'none';
-    final cpu = (cpuLimit ?? Platform.environment['MOBILE_PI_CPU_LIMIT'])?.trim() ?? '50%';
-    final mem = (memLimit ?? Platform.environment['MOBILE_PI_MEM_LIMIT'])?.trim() ?? '2G';
+    final mode =
+        (sandboxMode ?? Platform.environment['MOBILE_PI_SANDBOX_MODE'])
+            ?.trim()
+            .toLowerCase() ??
+        'none';
+    final cpu =
+        (cpuLimit ?? Platform.environment['MOBILE_PI_CPU_LIMIT'])?.trim() ??
+        '50%';
+    final mem =
+        (memLimit ?? Platform.environment['MOBILE_PI_MEM_LIMIT'])?.trim() ??
+        '2G';
 
     if (mode == 'systemd') {
       if (Platform.isLinux) {
-        _logger.info('event=pi_rpc.sandbox_enabled mode=systemd cpu=$cpu mem=$mem');
+        _logger.info(
+          'event=pi_rpc.sandbox_enabled mode=systemd cpu=$cpu mem=$mem',
+        );
         execArgs = [
           '--user',
           '--scope',
@@ -63,17 +73,20 @@ class PiRpcClient {
           '-p',
           'MemoryMax=$mem',
           exec,
-          ...execArgs
+          ...execArgs,
         ];
         exec = 'systemd-run';
       } else {
-        _logger.warning('event=pi_rpc.sandbox_failed reason=systemd_unsupported_on_platform platform=${Platform.operatingSystem}');
+        _logger.warning(
+          'event=pi_rpc.sandbox_failed reason=systemd_unsupported_on_platform platform=${Platform.operatingSystem}',
+        );
       }
     } else if (mode == 'macos') {
       if (Platform.isMacOS) {
         _logger.info('event=pi_rpc.sandbox_enabled mode=macos');
         // A standard macos sandbox profile that restricts system dir writes
-        const profile = '(version 1)\n'
+        const profile =
+            '(version 1)\n'
             '(allow default)\n'
             '(deny file-write* (subpath "/System"))\n'
             '(deny file-write* (subpath "/usr"))\n'
@@ -81,7 +94,9 @@ class PiRpcClient {
         execArgs = ['-p', profile, exec, ...execArgs];
         exec = 'sandbox-exec';
       } else {
-        _logger.warning('event=pi_rpc.sandbox_failed reason=macos_sandbox_unsupported_on_platform platform=${Platform.operatingSystem}');
+        _logger.warning(
+          'event=pi_rpc.sandbox_failed reason=macos_sandbox_unsupported_on_platform platform=${Platform.operatingSystem}',
+        );
       }
     }
 
@@ -332,10 +347,23 @@ class PiRpcClient {
     return _mapList(data['commands']);
   }
 
+  /// Test hook for the stdout JSONL parser; production input comes from Pi.
+  void handleLineForTesting(String line) => _handleLine(line);
+
   void _handleLine(String line) {
     if (line.isEmpty) return;
 
-    final decoded = jsonDecode(line);
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(line);
+    } catch (e, st) {
+      _logger.warning(
+        'event=pi_rpc.invalid_line reason=malformed_json ${logField('lineLength', line.length)}',
+        e,
+        st,
+      );
+      return;
+    }
     if (decoded is! Map) {
       _logger.warning(
         'event=pi_rpc.invalid_line reason=non_object ${logField('lineLength', line.length)}',

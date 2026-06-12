@@ -53,7 +53,7 @@ class ProjectSessionsScreen extends StatelessWidget {
         ),
         backgroundColor: cs.primary,
         foregroundColor: cs.onPrimary,
-        elevation: 4,
+        elevation: 0,
         label: const Text('新会话', style: TextStyle(fontWeight: FontWeight.w600)),
         icon: const Icon(Icons.add_rounded),
       ),

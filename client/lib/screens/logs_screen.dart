@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 
 import '../services/log_buffer.dart';
+import '../theme/app_tokens.dart';
 
 /// 日志页 —— 订阅 [LogBuffer]，倒序显示最近的日志记录。
 class LogsScreen extends StatefulWidget {
@@ -14,6 +15,33 @@ class LogsScreen extends StatefulWidget {
 
 class _LogsScreenState extends State<LogsScreen> {
   Level _minLevel = Level.INFO;
+
+  Future<void> _confirmClear() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空日志'),
+        content: const Text('确定要清空所有本地日志吗？此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      HapticFeedback.mediumImpact();
+      LogBuffer.instance.clear();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -40,52 +68,92 @@ class _LogsScreenState extends State<LogsScreen> {
           IconButton(
             tooltip: '清空',
             icon: const Icon(Icons.delete_outline_rounded),
-            onPressed: () => LogBuffer.instance.clear(),
+            onPressed: _confirmClear,
           ),
         ],
       ),
-      body: ValueListenableBuilder<List<LogRecord>>(
-        valueListenable: LogBuffer.instance.records,
-        builder: (ctx, all, _) {
-          final records = all
-              .where((r) => r.level >= _minLevel)
-              .toList(growable: false);
-          if (records.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.event_note_rounded,
-                    size: 40,
-                    color: cs.onSurface.withValues(alpha: 0.3),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    '暂无日志',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: cs.onSurface.withValues(alpha: 0.5),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
-          // 倒序：最新在顶
-          final reversed = records.reversed.toList(growable: false);
-          return ListView.separated(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-            itemCount: reversed.length,
-            separatorBuilder: (_, _) => Divider(
-              height: 1,
-              color: cs.outlineVariant.withValues(alpha: 0.35),
-            ),
-            itemBuilder: (ctx, i) => _LogTile(record: reversed[i]),
-          );
-        },
-      ),
+      body: LogsPanel(minLevel: _minLevel),
     );
   }
+}
+
+class LogsPanel extends StatelessWidget {
+  final Level minLevel;
+  final ScrollController? scrollController;
+
+  const LogsPanel({
+    super.key,
+    this.minLevel = Level.INFO,
+    this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return ValueListenableBuilder<List<LogRecord>>(
+      valueListenable: LogBuffer.instance.records,
+      builder: (ctx, all, _) {
+        final visibleCount = _visibleLogCount(all, minLevel);
+        if (visibleCount == 0) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.event_note_rounded,
+                  size: 40,
+                  color: cs.onSurface.withValues(alpha: 0.3),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '暂无日志',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: cs.onSurface.withValues(alpha: 0.5),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+        return ListView.separated(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+          itemCount: visibleCount,
+          separatorBuilder: (_, _) => Divider(
+            height: 1,
+            color: cs.outlineVariant.withValues(alpha: 0.35),
+          ),
+          itemBuilder: (ctx, i) =>
+              _LogTile(record: _visibleLogAtNewestFirst(all, minLevel, i)),
+        );
+      },
+    );
+  }
+}
+
+int _visibleLogCount(List<LogRecord> records, Level minLevel) {
+  var count = 0;
+  for (final record in records) {
+    if (record.level >= minLevel) count++;
+  }
+  return count;
+}
+
+LogRecord _visibleLogAtNewestFirst(
+  List<LogRecord> records,
+  Level minLevel,
+  int index,
+) {
+  var seen = 0;
+  for (var i = records.length - 1; i >= 0; i--) {
+    final record = records[i];
+    if (record.level < minLevel) continue;
+    if (seen == index) return record;
+    seen++;
+  }
+  throw RangeError.index(index, records, 'index');
 }
 
 class _LogTile extends StatelessWidget {
@@ -94,9 +162,10 @@ class _LogTile extends StatelessWidget {
 
   Color _levelColor(BuildContext ctx) {
     final cs = Theme.of(ctx).colorScheme;
+    final tokens = Theme.of(ctx).appTokens;
     if (record.level >= Level.SEVERE) return cs.error;
-    if (record.level >= Level.WARNING) return const Color(0xFFFBBF24);
-    if (record.level >= Level.INFO) return const Color(0xFF4ADE80);
+    if (record.level >= Level.WARNING) return tokens.statusWaiting;
+    if (record.level >= Level.INFO) return tokens.statusRunning;
     return cs.onSurface.withValues(alpha: 0.5);
   }
 
@@ -124,6 +193,7 @@ class _LogTile extends StatelessWidget {
 
     return InkWell(
       onLongPress: () async {
+        HapticFeedback.selectionClick();
         await Clipboard.setData(ClipboardData(text: fullText));
         if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -138,23 +208,33 @@ class _LogTile extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 56,
-              padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 6),
-              decoration: BoxDecoration(
-                color: color.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                record.level.name,
-                style: TextStyle(
-                  fontSize: 10,
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.w700,
-                  color: color,
-                  letterSpacing: 0.5,
-                ),
+            SizedBox(
+              width: 64,
+              child: Row(
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      record.level.name,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w700,
+                        color: color,
+                        letterSpacing: 0.5,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(width: 10),

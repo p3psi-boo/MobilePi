@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
 
 import '../models/node_state.dart';
@@ -20,12 +19,14 @@ class _TaskStatusBarState extends State<TaskStatusBar> {
   static const Duration _throttle = Duration(milliseconds: 220);
   DateTime? _lastSetAt;
   Timer? _timer;
+  final ScrollController _scrollController = ScrollController();
   ({int input, int output, int cacheRead, double percent, int contextWindow})?
   _display;
 
   @override
   void dispose() {
     _timer?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -54,7 +55,14 @@ class _TaskStatusBarState extends State<TaskStatusBar> {
     return null;
   }
 
-  static ({int input, int output, int cacheRead, double percent, int contextWindow}) _buildStats(TaskState task, NodeState? node) {
+  static ({
+    int input,
+    int output,
+    int cacheRead,
+    double percent,
+    int contextWindow,
+  })
+  _buildStats(TaskState task, NodeState? node) {
     var totalInput = 0;
     var totalOutput = 0;
     var totalCacheRead = 0;
@@ -95,93 +103,117 @@ class _TaskStatusBarState extends State<TaskStatusBar> {
 
   @override
   Widget build(BuildContext context) {
-    return Selector<NodeProvider, (TaskState?, NodeState?)>(
-      selector: (ctx, p) {
-        final t = p.getTask(widget.taskId);
-        NodeState? node;
-        if (t != null) {
-          for (final n in p.nodes) {
-            if (n.nodeId == t.nodeId) {
-              node = n;
-              break;
-            }
-          }
-        }
-        return (t, node);
-      },
-      builder: (ctx, data, _) {
-        final (task, node) = data;
+    final taskListenable = context.read<NodeProvider>().taskListenable(
+      widget.taskId,
+    );
+    return ValueListenableBuilder<TaskState?>(
+      valueListenable: taskListenable,
+      builder: (ctx, task, _) {
         if (task == null) return const SizedBox.shrink();
 
-        final theme = Theme.of(context);
-        final next = _buildStats(task, node);
-        final now = DateTime.now();
-        final last = _lastSetAt;
-        if (_display == null || last == null || now.difference(last) >= _throttle) {
-          _display = next;
-          _lastSetAt = now;
-        } else {
-          _timer?.cancel();
-          _timer = Timer(_throttle - now.difference(last), () {
-            if (!mounted) return;
-            setState(() {
-              _display = next;
-              _lastSetAt = DateTime.now();
-            });
-          });
-        }
-        final stats = _display ?? next;
-        final textStyle = theme.textTheme.bodySmall?.copyWith(
-          fontFeatures: const [FontFeature.tabularFigures()],
-          color: theme.colorScheme.onSurfaceVariant,
-        );
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
-          child: Row(
-            children: [
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      Text('↑', style: textStyle),
-                      _FlipStatNumber(
-                        value: stats.input > 0 ? _formatTokens(stats.input) : '-',
-                        style: textStyle,
-                      ),
-                      const SizedBox(width: 8),
-                      Text('↓', style: textStyle),
-                      _FlipStatNumber(
-                        value: stats.output > 0 ? _formatTokens(stats.output) : '-',
-                        style: textStyle,
-                      ),
-                      if (stats.cacheRead > 0) ...[
-                        const SizedBox(width: 8),
-                        Text('R${_formatTokens(stats.cacheRead)}', style: textStyle),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Text(
-                '${stats.percent.toStringAsFixed(1)}%/${stats.contextWindow > 0 ? _formatTokens(stats.contextWindow) : '-'}',
-                style: textStyle?.copyWith(
-                  color: stats.percent > 90
-                      ? theme.colorScheme.error
-                      : (stats.percent > 70
-                            ? theme.colorScheme.tertiary
-                            : theme.colorScheme.onSurfaceVariant),
-                ),
-                textAlign: TextAlign.right,
-              ),
-            ],
-          ),
+        return Selector<NodeProvider, NodeState?>(
+          selector: (_, p) => p.getNode(task.nodeId),
+          builder: (ctx, node, _) {
+            return _buildStatusBar(ctx, task, node);
+          },
         );
       },
+    );
+  }
+
+  Widget _buildStatusBar(
+    BuildContext context,
+    TaskState task,
+    NodeState? node,
+  ) {
+    final theme = Theme.of(context);
+    final next = _buildStats(task, node);
+    final now = DateTime.now();
+    final last = _lastSetAt;
+    if (_display == null || last == null || now.difference(last) >= _throttle) {
+      _display = next;
+      _lastSetAt = now;
+    } else {
+      _timer?.cancel();
+      _timer = Timer(_throttle - now.difference(last), () {
+        if (!mounted) return;
+        setState(() {
+          _display = next;
+          _lastSetAt = DateTime.now();
+        });
+      });
+    }
+    final stats = _display ?? next;
+    final textStyle = theme.textTheme.bodySmall?.copyWith(
+      fontFeatures: const [FontFeature.tabularFigures()],
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+      child: Row(
+        children: [
+          Expanded(
+            child: Scrollbar(
+              controller: _scrollController,
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    Tooltip(
+                      message: '输入 token',
+                      child: Text('↑', style: textStyle),
+                    ),
+                    _FlipStatNumber(
+                      value: stats.input > 0 ? _formatTokens(stats.input) : '-',
+                      style: textStyle,
+                    ),
+                    const SizedBox(width: 8),
+                    Tooltip(
+                      message: '输出 token',
+                      child: Text('↓', style: textStyle),
+                    ),
+                    _FlipStatNumber(
+                      value: stats.output > 0
+                          ? _formatTokens(stats.output)
+                          : '-',
+                      style: textStyle,
+                    ),
+                    if (stats.cacheRead > 0) ...[
+                      const SizedBox(width: 8),
+                      Tooltip(
+                        message: '缓存命中 token',
+                        child: Text(
+                          '缓存 ${_formatTokens(stats.cacheRead)}',
+                          style: textStyle,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Tooltip(
+            message: '上下文使用率 / 上下文窗口大小',
+            child: Text(
+              '${stats.percent.toStringAsFixed(1)}%/${stats.contextWindow > 0 ? _formatTokens(stats.contextWindow) : '-'}',
+              style: textStyle?.copyWith(
+                color: stats.percent > 90
+                    ? theme.colorScheme.error
+                    : (stats.percent > 70
+                          ? theme.colorScheme.tertiary
+                          : theme.colorScheme.onSurfaceVariant),
+              ),
+              textAlign: TextAlign.right,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

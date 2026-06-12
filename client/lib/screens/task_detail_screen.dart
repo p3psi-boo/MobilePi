@@ -1,11 +1,14 @@
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/node_state.dart';
 import '../providers/node_provider.dart';
+import '../theme/app_tokens.dart';
 import '../widgets/pi_markdown.dart';
 import '../widgets/task_status_bar.dart';
+import 'logs_screen.dart';
 
 /// 任务详情页 — 展示完整输出流 + Steering/Follow-up 输入
 const int _maxRenderedStreamingChars = 24000;
@@ -20,15 +23,18 @@ class TaskDetailScreen extends StatefulWidget {
 }
 
 class _TaskDetailScreenState extends State<TaskDetailScreen> {
+  static const double _edgeSwipeWidth = 24;
+  static const double _edgeSwipePopDistance = 72;
+
   final _inputController = TextEditingController();
   final _inputFocusNode = FocusNode();
   // Keep composer-only state out of the page rebuild path.
-  final _isSteer = ValueNotifier<bool>(false); // false = followUp, true = steer
   final _selectedModel = ValueNotifier<String?>(null); // null = node default
+  bool _edgeSwipeActive = false;
+  double _edgeSwipeDistance = 0;
 
   @override
   void dispose() {
-    _isSteer.dispose();
     _selectedModel.dispose();
     _inputController.dispose();
     _inputFocusNode.dispose();
@@ -39,49 +45,168 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     final text = _inputController.text.trim();
     if (text.isEmpty) return;
 
+    HapticFeedback.lightImpact();
     final provider = context.read<NodeProvider>();
-    if (_isSteer.value) {
-      provider.sendSteer(widget.taskId, text, model: _selectedModel.value);
-    } else {
-      provider.sendFollowUp(widget.taskId, text, model: _selectedModel.value);
-    }
+    provider.sendComposerMessage(
+      widget.taskId,
+      text,
+      model: _selectedModel.value,
+    );
     _inputController.clear();
   }
 
   @override
   Widget build(BuildContext context) {
-    final taskExists = context.select<NodeProvider, bool>(
-      (p) => p.getTask(widget.taskId) != null,
+    final taskListenable = context.read<NodeProvider>().taskListenable(
+      widget.taskId,
     );
 
-    if (!taskExists) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('任务不存在')),
-        body: const Center(child: Text('任务未找到')),
-      );
-    }
+    return ValueListenableBuilder<TaskState?>(
+      valueListenable: taskListenable,
+      builder: (context, task, _) {
+        final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+        if (task == null) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('任务不存在')),
+            body: const Center(child: Text('任务未找到')),
+          );
+        }
 
-    return Scaffold(
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(kToolbarHeight),
-        child: _TaskAppBar(taskId: widget.taskId),
-      ),
-      body: Column(
-        children: [
-          TaskStatusBar(taskId: widget.taskId),
-          Expanded(child: _OutputView(taskId: widget.taskId)),
-          _TaskInputBarWrapper(
-            taskId: widget.taskId,
-            controller: _inputController,
-            focusNode: _inputFocusNode,
-            isSteerListenable: _isSteer,
-            selectedModelListenable: _selectedModel,
-            onSteerToggle: () => _isSteer.value = !_isSteer.value,
-            onModelChanged: (m) => _selectedModel.value = m,
-            onSend: _send,
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onHorizontalDragStart: _onHorizontalDragStart,
+          onHorizontalDragUpdate: _onHorizontalDragUpdate,
+          onHorizontalDragEnd: _onHorizontalDragEnd,
+          child: Scaffold(
+            appBar: PreferredSize(
+              preferredSize: const Size.fromHeight(kToolbarHeight),
+              child: _TaskAppBar(taskId: widget.taskId),
+            ),
+            body: Column(
+              children: [
+                TaskStatusBar(taskId: widget.taskId),
+                Expanded(child: _OutputView(taskId: widget.taskId)),
+                const _TaskLogDrawerHandle(),
+                _TaskInputBarWrapper(
+                  taskId: widget.taskId,
+                  controller: _inputController,
+                  focusNode: _inputFocusNode,
+                  selectedModelListenable: _selectedModel,
+                  onModelChanged: (m) => _selectedModel.value = m,
+                  keyboardOpen: keyboardOpen,
+                  onSend: _send,
+                ),
+              ],
+            ),
           ),
-        ],
+        );
+      },
+    );
+  }
+
+  void _onHorizontalDragStart(DragStartDetails details) {
+    _edgeSwipeActive = details.globalPosition.dx <= _edgeSwipeWidth;
+    _edgeSwipeDistance = 0;
+  }
+
+  void _onHorizontalDragUpdate(DragUpdateDetails details) {
+    if (!_edgeSwipeActive) return;
+    _edgeSwipeDistance += details.primaryDelta ?? 0;
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    if (!_edgeSwipeActive) return;
+    final velocity = details.primaryVelocity ?? 0;
+    final shouldPop =
+        _edgeSwipeDistance >= _edgeSwipePopDistance || velocity > 450;
+    _edgeSwipeActive = false;
+    _edgeSwipeDistance = 0;
+    if (shouldPop) {
+      HapticFeedback.selectionClick();
+      Navigator.of(context).maybePop();
+    }
+  }
+}
+
+class _TaskLogDrawerHandle extends StatelessWidget {
+  const _TaskLogDrawerHandle();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _showLogs(context),
+      onVerticalDragEnd: (details) {
+        final velocity = details.primaryVelocity ?? 0;
+        if (velocity < -120) _showLogs(context);
+      },
+      child: Tooltip(
+        message: '日志',
+        child: SizedBox(
+          height: 44,
+          child: Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: cs.onSurfaceVariant.withValues(alpha: 0.32),
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+          ),
+        ),
       ),
+    );
+  }
+
+  void _showLogs(BuildContext context) {
+    HapticFeedback.selectionClick();
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.58,
+          minChildSize: 0.32,
+          maxChildSize: 0.92,
+          builder: (context, scrollController) {
+            return SafeArea(
+              top: false,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.receipt_long_rounded,
+                          size: 18,
+                          color: theme.colorScheme.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '日志',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: LogsPanel(scrollController: scrollController),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
@@ -92,20 +217,20 @@ class _TaskAppBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Selector<NodeProvider, (String, bool, TaskState?)>(
-      selector: (ctx, p) {
-        final t = p.getTask(taskId);
-        return (t?.displayTitle ?? '', t?.status == 'running', t);
-      },
-      builder: (ctx, data, _) {
-        final (title, isRunning, task) = data;
+    final taskListenable = context.read<NodeProvider>().taskListenable(taskId);
+    return ValueListenableBuilder<TaskState?>(
+      valueListenable: taskListenable,
+      builder: (ctx, task, _) {
+        final cs = Theme.of(ctx).colorScheme;
+        final title = task?.displayTitle ?? '';
+        final isRunning = task?.status == 'running';
         return AppBar(
           title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
           centerTitle: true,
           actions: [
             if (isRunning && task != null)
               IconButton(
-                icon: const Icon(Icons.stop_circle, color: Colors.red),
+                icon: Icon(Icons.stop_circle, color: cs.error),
                 tooltip: '紧急停止',
                 onPressed: () => _confirmPanic(ctx, task),
               ),
@@ -116,6 +241,7 @@ class _TaskAppBar extends StatelessWidget {
   }
 
   void _confirmPanic(BuildContext context, TaskState task) {
+    final cs = Theme.of(context).colorScheme;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -134,7 +260,7 @@ class _TaskAppBar extends StatelessWidget {
               );
               Navigator.of(ctx).pop();
             },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(foregroundColor: cs.error),
             child: const Text('终止'),
           ),
         ],
@@ -147,49 +273,32 @@ class _TaskInputBarWrapper extends StatelessWidget {
   final String taskId;
   final TextEditingController controller;
   final FocusNode focusNode;
-  final ValueListenable<bool> isSteerListenable;
   final ValueListenable<String?> selectedModelListenable;
-  final VoidCallback onSteerToggle;
   final ValueChanged<String?> onModelChanged;
+  final bool keyboardOpen;
   final VoidCallback onSend;
 
   const _TaskInputBarWrapper({
     required this.taskId,
     required this.controller,
     required this.focusNode,
-    required this.isSteerListenable,
     required this.selectedModelListenable,
-    required this.onSteerToggle,
     required this.onModelChanged,
+    required this.keyboardOpen,
     required this.onSend,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Selector<NodeProvider, (bool, bool, NodeState?, String?)>(
-      selector: (ctx, p) {
-        final t = p.getTask(taskId);
-        final isHistory = t?.status == 'history';
-        final isRunning = t?.status == 'running';
-        NodeState? node;
-        if (t != null) {
-          for (final n in p.nodes) {
-            if (n.nodeId == t.nodeId) {
-              node = n;
-              break;
-            }
-          }
-        }
-        // 当前任务实际使用的模型（来自最新消息或 task.model）
-        final currentModel = t?.model ?? node?.piDefaultModel;
-        return (isHistory, isRunning, node, currentModel);
-      },
-      builder: (ctx, data, _) {
-        final (isHistory, isRunning, node, currentModel) = data;
-
-        return ValueListenableBuilder<bool>(
-          valueListenable: isSteerListenable,
-          builder: (context, isSteer, _) {
+    final taskListenable = context.read<NodeProvider>().taskListenable(taskId);
+    return ValueListenableBuilder<TaskState?>(
+      valueListenable: taskListenable,
+      builder: (ctx, task, _) {
+        final isRunning = task?.status == 'running';
+        return Selector<NodeProvider, NodeState?>(
+          selector: (_, p) => p.getNode(task?.nodeId ?? ''),
+          builder: (ctx, node, _) {
+            final currentModel = task?.model ?? node?.piDefaultModel;
             return ValueListenableBuilder<String?>(
               valueListenable: selectedModelListenable,
               builder: (context, selectedModel, _) {
@@ -197,11 +306,10 @@ class _TaskInputBarWrapper extends StatelessWidget {
                   controller: controller,
                   focusNode: focusNode,
                   node: node,
-                  isSteer: isSteer,
                   isRunning: isRunning,
                   selectedModel: selectedModel ?? currentModel,
-                  onSteerToggle: onSteerToggle,
                   onModelChanged: onModelChanged,
+                  keyboardOpen: keyboardOpen,
                   onSend: onSend,
                 );
               },
@@ -244,12 +352,9 @@ class _OutputViewState extends State<_OutputView> {
   /// tracks additional user-expanded turns.
   final _expandedTurnKeys = <int>{};
 
-  /// Incremented whenever _expandedTurnKeys changes, used to trigger
-  /// Selector rebuilds when the user toggles a turn.
-  int _collapseVersion = 0;
-
   /// Stick-to-bottom state machine — mirrors howcode's shouldStickToBottom.
   bool _shouldStickToBottom = true;
+  final _showScrollToBottom = ValueNotifier<bool>(false);
   bool _programmaticScroll = false;
   static const _autoScrollThreshold = 50.0;
 
@@ -257,12 +362,14 @@ class _OutputViewState extends State<_OutputView> {
   /// （dispose 时 Element 已非 active，会导致
   /// "Looking up a deactivated widget's ancestor is unsafe"）。
   late final NodeProvider _provider;
+  late final ValueListenable<TaskState?> _taskListenable;
 
   @override
   void initState() {
     super.initState();
     _provider = context.read<NodeProvider>();
-    final task = _provider.getTask(widget.taskId);
+    _taskListenable = _provider.taskListenable(widget.taskId);
+    final task = _taskListenable.value;
 
     if (task != null) {
       _lastMessageCount = task.messages.length;
@@ -286,20 +393,21 @@ class _OutputViewState extends State<_OutputView> {
     }
 
     _scrollController.addListener(_onScroll);
-    _provider.addListener(_onProviderChanged);
+    _taskListenable.addListener(_onTaskChanged);
     _scrollToBottom(animate: false);
   }
 
   @override
   void dispose() {
-    _provider.removeListener(_onProviderChanged);
+    _taskListenable.removeListener(_onTaskChanged);
+    _showScrollToBottom.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
 
   void _loadEarlier() {
-    final task = _provider.getTask(widget.taskId);
+    final task = _taskListenable.value;
     if (task == null || !_hasMore || _isLoadingMore) return;
     if (task.sessionPath == null || task.sessionPath!.isEmpty) return;
 
@@ -332,18 +440,18 @@ class _OutputViewState extends State<_OutputView> {
 
     // Update stick-to-bottom flag — analogous to howcode's
     // shouldStickToBottomRef = isScrollContainerNearBottom(...).
-    final wasStick = _shouldStickToBottom;
-    _shouldStickToBottom = (max - pixels) < _autoScrollThreshold;
-    if (_shouldStickToBottom != wasStick) {
-      // Rebuild so the scroll-to-bottom button appears/disappears.
-      // Provider's Selector will skip since messages haven't changed.
-      setState(() {});
-    }
+    _setShouldStickToBottom((max - pixels) < _autoScrollThreshold);
   }
 
-  void _onProviderChanged() {
+  void _setShouldStickToBottom(bool value) {
+    if (_shouldStickToBottom == value) return;
+    _shouldStickToBottom = value;
+    _showScrollToBottom.value = !value;
+  }
+
+  void _onTaskChanged() {
     if (!mounted) return;
-    final task = _provider.getTask(widget.taskId);
+    final task = _taskListenable.value;
     if (task == null) return;
 
     _hasMore = task.nextBeforeIndex == null || task.nextBeforeIndex! > 0;
@@ -419,13 +527,13 @@ class _OutputViewState extends State<_OutputView> {
       // If user has scrolled up significantly, don't interrupt them
       // unless we are forcing (animate = false, used during streaming).
       if (max - current > _autoScrollThreshold && animate) {
-        _shouldStickToBottom = false;
+        _setShouldStickToBottom(false);
         return;
       }
 
       _programmaticScroll = true;
       _scrollController.jumpTo(max);
-      _shouldStickToBottom = true;
+      _setShouldStickToBottom(true);
       _programmaticScroll = false;
     });
   }
@@ -478,8 +586,8 @@ class _OutputViewState extends State<_OutputView> {
                         ),
                         child: Text(
                           _previousCount > 0
-                              ? '$_previousCount earlier messages'
-                              : 'Load earlier messages',
+                              ? '$_previousCount 条更早的消息'
+                              : '加载更早的消息',
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: cs.onSurfaceVariant.withValues(alpha: 0.5),
                           ),
@@ -492,215 +600,137 @@ class _OutputViewState extends State<_OutputView> {
             SliverPadding(
               padding: const EdgeInsets.all(16),
               sliver:
-                  Selector<
-                    NodeProvider,
-                    (List<PiSessionMessageInfo>, String?, int)
+                  _TaskSliceBuilder<
+                    (List<PiSessionMessageInfo>, String?, String?)
                   >(
-                    selector: (ctx, p) {
-                      final task = p.getTask(widget.taskId);
-                      // task-level fallback model（用于没有 per-message model 的情况）
-                      String? fallbackModel = task?.model;
-                      if (fallbackModel == null || fallbackModel.isEmpty) {
-                        final node = p.getNode(task?.nodeId ?? '');
-                        fallbackModel = node?.piDefaultModel;
-                      }
-                      return (
-                        task?.messages ?? const [],
-                        fallbackModel,
-                        _collapseVersion,
-                      );
-                    },
+                    taskId: widget.taskId,
+                    selector: (task) => (
+                      task?.messages ?? const <PiSessionMessageInfo>[],
+                      task?.model,
+                      task?.nodeId,
+                    ),
                     shouldRebuild: (prev, next) =>
-                        prev.$1.length != next.$1.length ||
+                        !identical(prev.$1, next.$1) ||
                         prev.$2 != next.$2 ||
                         prev.$3 != next.$3,
-                    builder: (context, data, _) {
-                      final (messages, fallbackModel, collapseVer) = data;
-                      if (messages.isEmpty) {
-                        return const SliverToBoxAdapter(
-                          child: SizedBox.shrink(),
-                        );
-                      }
-                      return SliverList(
-                        delegate: SliverChildBuilderDelegate((context, idx) {
-                          final msg = messages[idx];
-
-                          // Skip non-start indices within a non-user group.
-                          if (idx > 0 &&
-                              msg.role != 'user' &&
-                              messages[idx - 1].role != 'user') {
-                            return const SizedBox.shrink();
-                          }
-
-                          final isUser = msg.role == 'user';
-                          if (isUser) {
-                            return _MessageItem(
-                              key: ValueKey('msg_$idx'),
-                              message: msg,
-                              isUser: true,
-                              isFinal: true,
-                              modelName: fallbackModel,
-                              showHeader: true,
-                            );
-                          }
-
-                          // Collect consecutive non-user messages into a group.
-                          int end = idx;
-                          while (end < messages.length &&
-                              messages[end].role != 'user') {
-                            end++;
-                          }
-                          final group = messages.sublist(idx, end);
-                          final turnKey = 'turn_$idx';
-
-                          // Find the index of the LAST non-user group.
-                          int lastNonUserIdx = -1;
-                          for (int i = messages.length - 1; i >= 0; i--) {
-                            if (messages[i].role != 'user') {
-                              while (i > 0 && messages[i - 1].role != 'user') {
-                                i--;
-                              }
-                              lastNonUserIdx = i;
-                              break;
-                            }
-                          }
-
-                          final isLatest = idx == lastNonUserIdx;
-                          final isExpanded =
-                              isLatest || _expandedTurnKeys.contains(idx);
-
-                          if (isExpanded) {
-                            return _AgentTurnWidget(
-                              key: ValueKey(turnKey),
-                              messages: group,
-                              modelName: msg.model ?? fallbackModel,
-                            );
-                          }
-
-                          return _CollapsedTurnRow(
-                            key: ValueKey('collapsed_$idx'),
-                            turnKey: turnKey,
-                            messages: group,
-                            modelName: msg.model ?? fallbackModel,
-                            onExpand: () => setState(() {
+                    builder: (context, data) {
+                      final (messages, taskModel, nodeId) = data;
+                      return Selector<NodeProvider, String?>(
+                        selector: (_, p) =>
+                            p.getNode(nodeId ?? '')?.piDefaultModel,
+                        builder: (context, defaultModel, _) {
+                          final fallbackModel =
+                              taskModel == null || taskModel.isEmpty
+                              ? defaultModel
+                              : taskModel;
+                          return _HistoryMessagesSliver(
+                            messages: messages,
+                            fallbackModel: fallbackModel,
+                            expandedTurnKeys: _expandedTurnKeys,
+                            onExpand: (idx) => setState(() {
                               _expandedTurnKeys.add(idx);
-                              _collapseVersion++;
-                              _shouldStickToBottom = false;
+                              _setShouldStickToBottom(false);
                             }),
                           );
-                        }, childCount: messages.length),
+                        },
                       );
                     },
                   ),
             ),
             SliverPadding(
               padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
-              sliver:
-                  Selector<
-                    NodeProvider,
-                    (List<MessagePart>, bool, List<StreamingToolEvent>, String?)
-                  >(
-                    selector: (ctx, p) {
-                      final t = p.getTask(widget.taskId);
-                      return (
-                        t?.streamingParts ?? const [],
-                        t?.status == 'running',
-                        t?.toolEvents ?? const [],
-                        t?.statusLabel,
-                      );
-                    },
-                    builder: (context, data, _) {
-                      final streamingParts = data.$1;
-                      final isRunning = data.$2;
-                      final toolEvents = data.$3;
-                      final statusLabel = data.$4;
-                      final hasStreamingText = streamingParts.any(
-                        (part) => (part.text ?? '').trim().isNotEmpty,
-                      );
-                      final hasContent =
-                          hasStreamingText ||
-                          toolEvents.isNotEmpty ||
-                          statusLabel != null;
-                      if (!hasContent) {
-                        if (isRunning && _lastMessageCount == 0) {
-                          return const SliverToBoxAdapter(
-                            child: Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  CircularProgressIndicator(),
-                                  SizedBox(height: 8),
-                                  Text(
-                                    '等待 Agent 输出...',
-                                    style: TextStyle(color: Colors.grey),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        } else if (!isRunning && _lastMessageCount == 0) {
-                          return const SliverToBoxAdapter(
-                            child: Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.chat_bubble_outline,
-                                    size: 48,
-                                    color: Colors.grey,
-                                  ),
-                                  SizedBox(height: 8),
-                                  Text(
-                                    '暂无输出',
-                                    style: TextStyle(color: Colors.grey),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        }
-                        return const SliverToBoxAdapter(
-                          child: SizedBox.shrink(),
-                        );
-                      }
-
+              sliver: _TaskSliceBuilder<(List<MessagePart>, bool, String?)>(
+                taskId: widget.taskId,
+                selector: (task) => (
+                  task?.streamingParts ?? const <MessagePart>[],
+                  task?.status == 'running',
+                  task?.statusLabel,
+                ),
+                shouldRebuild: (prev, next) =>
+                    !identical(prev.$1, next.$1) ||
+                    prev.$2 != next.$2 ||
+                    prev.$3 != next.$3,
+                builder: (context, data) {
+                  final emptyColor = Theme.of(
+                    context,
+                  ).colorScheme.onSurfaceVariant.withValues(alpha: 0.62);
+                  final streamingParts = data.$1;
+                  final isRunning = data.$2;
+                  final statusLabel = data.$3;
+                  final hasStreamingParts = streamingParts.any(
+                    (part) =>
+                        (part.text ?? '').trim().isNotEmpty ||
+                        part.type == MessagePartType.toolCall ||
+                        part.type == MessagePartType.toolResult ||
+                        part.type == MessagePartType.skill,
+                  );
+                  final hasContent = hasStreamingParts || statusLabel != null;
+                  if (!hasContent) {
+                    if (isRunning && _lastMessageCount == 0) {
                       return SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 12),
+                        child: Center(
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              if (_streamingPartsTextLength(streamingParts) >
-                                  _maxRenderedStreamingChars)
-                                _OutputTruncationNotice(
-                                  omittedChars:
-                                      _streamingPartsTextLength(
-                                        streamingParts,
-                                      ) -
-                                      _maxRenderedStreamingChars,
-                                ),
-                              if (hasStreamingText)
-                                ..._buildStreamingPartWidgets(
-                                  context,
-                                  streamingParts,
-                                  isFinal: !isRunning,
-                                ),
-                              // Structured tool events
-                              if (toolEvents.isNotEmpty)
-                                _buildStreamingToolChips(
-                                  context,
-                                  toolEvents,
-                                  isFinal: !isRunning,
-                                ),
-                              // Status label (compaction, retry, etc.)
-                              if (statusLabel != null)
-                                _StatusLabel(label: statusLabel),
+                              const CircularProgressIndicator(),
+                              const SizedBox(height: 8),
+                              Text(
+                                '等待 Agent 输出...',
+                                style: TextStyle(color: emptyColor),
+                              ),
                             ],
                           ),
                         ),
                       );
-                    },
-                  ),
+                    } else if (!isRunning && _lastMessageCount == 0) {
+                      return SliverToBoxAdapter(
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.chat_bubble_outline,
+                                size: 48,
+                                color: emptyColor,
+                              ),
+                              const SizedBox(height: 8),
+                              Text('暂无输出', style: TextStyle(color: emptyColor)),
+                            ],
+                          ),
+                        ),
+                      );
+                    }
+                    return const SliverToBoxAdapter(child: SizedBox.shrink());
+                  }
+
+                  return SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (_streamingPartsTextLength(streamingParts) >
+                              _maxRenderedStreamingChars)
+                            _OutputTruncationNotice(
+                              omittedChars:
+                                  _streamingPartsTextLength(streamingParts) -
+                                  _maxRenderedStreamingChars,
+                            ),
+                          if (hasStreamingParts)
+                            ..._buildStreamingPartWidgets(
+                              context,
+                              streamingParts,
+                              isFinal: !isRunning,
+                            ),
+                          // Status label (compaction, retry, etc.)
+                          if (statusLabel != null)
+                            _StatusLabel(label: statusLabel),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
           ],
         ),
@@ -717,8 +747,7 @@ class _OutputViewState extends State<_OutputView> {
                 borderRadius: BorderRadius.circular(20),
                 onTap: () => setState(() {
                   _expandedTurnKeys.clear();
-                  _collapseVersion++;
-                  _shouldStickToBottom = true;
+                  _setShouldStickToBottom(true);
                   _scrollToBottom(animate: false);
                 }),
                 child: Padding(
@@ -734,30 +763,233 @@ class _OutputViewState extends State<_OutputView> {
           ),
 
         // Scroll-to-bottom button when not at bottom.
-        if (!_shouldStickToBottom)
-          Positioned(
-            right: 12,
-            bottom: 136,
-            child: Material(
-              color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(20),
-              child: InkWell(
+        ValueListenableBuilder<bool>(
+          valueListenable: _showScrollToBottom,
+          builder: (context, show, _) {
+            if (!show) return const SizedBox.shrink();
+            return Positioned(
+              right: 12,
+              bottom: 136,
+              child: Material(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.85),
                 borderRadius: BorderRadius.circular(20),
-                onTap: () => _scrollToBottom(animate: false),
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Icon(
-                    Icons.keyboard_double_arrow_down_rounded,
-                    size: 18,
-                    color: cs.onSurfaceVariant,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(20),
+                  onTap: () => _scrollToBottom(animate: false),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Icon(
+                      Icons.keyboard_double_arrow_down_rounded,
+                      size: 18,
+                      color: cs.onSurfaceVariant,
+                    ),
                   ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
+        ),
       ],
     );
   }
+}
+
+class _TaskSliceBuilder<T> extends StatefulWidget {
+  final String taskId;
+  final T Function(TaskState? task) selector;
+  final bool Function(T previous, T next)? shouldRebuild;
+  final Widget Function(BuildContext context, T value) builder;
+
+  const _TaskSliceBuilder({
+    required this.taskId,
+    required this.selector,
+    required this.builder,
+    this.shouldRebuild,
+  });
+
+  @override
+  State<_TaskSliceBuilder<T>> createState() => _TaskSliceBuilderState<T>();
+}
+
+class _TaskSliceBuilderState<T> extends State<_TaskSliceBuilder<T>> {
+  ValueListenable<TaskState?>? _listenable;
+  late T _value;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _attachIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(covariant _TaskSliceBuilder<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.taskId != widget.taskId) {
+      _detach();
+      _attachIfNeeded();
+      return;
+    }
+    _updateValue(rebuild: false);
+  }
+
+  @override
+  void dispose() {
+    _detach();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.builder(context, _value);
+  }
+
+  void _attachIfNeeded() {
+    if (_listenable != null) return;
+    _listenable = context.read<NodeProvider>().taskListenable(widget.taskId)
+      ..addListener(_onTaskChanged);
+    _value = widget.selector(_listenable!.value);
+  }
+
+  void _detach() {
+    _listenable?.removeListener(_onTaskChanged);
+    _listenable = null;
+  }
+
+  void _onTaskChanged() {
+    _updateValue(rebuild: true);
+  }
+
+  void _updateValue({required bool rebuild}) {
+    final listenable = _listenable;
+    if (listenable == null) return;
+    final next = widget.selector(listenable.value);
+    if (!_hasChanged(_value, next)) return;
+    if (rebuild && mounted) {
+      setState(() => _value = next);
+    } else {
+      _value = next;
+    }
+  }
+
+  bool _hasChanged(T previous, T next) {
+    final shouldRebuild = widget.shouldRebuild;
+    if (shouldRebuild != null) return shouldRebuild(previous, next);
+    return previous != next;
+  }
+}
+
+class _HistoryMessagesSliver extends StatelessWidget {
+  final List<PiSessionMessageInfo> messages;
+  final String? fallbackModel;
+  final Set<int> expandedTurnKeys;
+  final ValueChanged<int> onExpand;
+
+  const _HistoryMessagesSliver({
+    required this.messages,
+    required this.fallbackModel,
+    required this.expandedTurnKeys,
+    required this.onExpand,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (messages.isEmpty) {
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
+    return SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, idx) {
+          final msg = messages[idx];
+
+          // Skip non-start indices within a non-user group.
+          if (idx > 0 &&
+              msg.role != 'user' &&
+              messages[idx - 1].role != 'user') {
+            return const SizedBox.shrink();
+          }
+
+          final isUser = msg.role == 'user';
+          if (isUser) {
+            return _MessageItem(
+              key: ValueKey('msg_$idx'),
+              message: msg,
+              isUser: true,
+              isFinal: true,
+              modelName: fallbackModel,
+              showHeader: true,
+            );
+          }
+
+          // Collect consecutive non-user messages into a group.
+          var end = idx;
+          while (end < messages.length && messages[end].role != 'user') {
+            end++;
+          }
+          final group = messages.sublist(idx, end);
+          final turnKey = 'turn_$idx';
+
+          // Find the index of the LAST non-user group.
+          var lastNonUserIdx = -1;
+          for (var i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role != 'user') {
+              while (i > 0 && messages[i - 1].role != 'user') {
+                i--;
+              }
+              lastNonUserIdx = i;
+              break;
+            }
+          }
+
+          final isLatest = idx == lastNonUserIdx;
+          final isExpanded = isLatest || expandedTurnKeys.contains(idx);
+
+          if (isExpanded) {
+            return _AgentTurnWidget(
+              key: ValueKey(turnKey),
+              messages: group,
+              modelName: msg.model ?? fallbackModel,
+            );
+          }
+
+          return _CollapsedTurnRow(
+            key: ValueKey('collapsed_$idx'),
+            turnKey: turnKey,
+            messages: group,
+            modelName: msg.model ?? fallbackModel,
+            onExpand: () => onExpand(idx),
+          );
+        },
+        childCount: messages.length,
+        addAutomaticKeepAlives: false,
+        addRepaintBoundaries: true,
+      ),
+    );
+  }
+}
+
+/// 提取一条消息的可读纯文本：优先用 message.text，
+/// 为空时回退到结构化 parts 里的正文 / 思考片段（跳过工具调用）。
+String _messagePlainText(PiSessionMessageInfo m) {
+  if (m.text.trim().isNotEmpty) return m.text.trim();
+  return m.parts
+      .where(
+        (p) =>
+            p.type == MessagePartType.text ||
+            p.type == MessagePartType.thinking,
+      )
+      .map((p) => p.text ?? '')
+      .where((t) => t.trim().isNotEmpty)
+      .join('\n\n');
+}
+
+/// 复制消息文本到剪贴板，并给出触觉 + 视觉反馈。
+void _copyMessage(BuildContext context, String text) {
+  if (text.trim().isEmpty) return;
+  HapticFeedback.mediumImpact();
+  Clipboard.setData(ClipboardData(text: text));
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('已复制到剪贴板'), duration: Duration(seconds: 1)),
+  );
 }
 
 int _streamingPartsTextLength(List<MessagePart> parts) {
@@ -775,78 +1007,6 @@ List<Widget> _buildStreamingPartWidgets(
   bool isFinal = true,
 }) {
   return _buildHistoryPartWidgets(context, streamingParts, isFinal: isFinal);
-}
-
-/// Render structured tool events as chips.
-///
-/// Merges call+result pairs into a single chip so the UI shows one
-/// entry per tool execution, matching pi-tui's single-line display.
-Widget _buildStreamingToolChips(
-  BuildContext context,
-  List<StreamingToolEvent> toolEvents, {
-  bool isFinal = true,
-}) {
-  final chips = <Widget>[];
-  final consumed = <int>{};
-
-  for (int i = 0; i < toolEvents.length; i++) {
-    if (consumed.contains(i)) continue;
-    final ev = toolEvents[i];
-
-    if (ev.isResult) {
-      // Standalone result — render directly.
-      chips.add(
-        _ToolChip(
-          key: ValueKey('tr_$i'),
-          toolName: ev.name,
-          status: ev.isError ? '失败' : '成功',
-          content: ev.resultText,
-        ),
-      );
-      consumed.add(i);
-    } else {
-      // Call event — look for a matching result anywhere later.
-      int? resultIdx;
-      for (int j = i + 1; j < toolEvents.length; j++) {
-        if (toolEvents[j].isResult && toolEvents[j].name == ev.name) {
-          resultIdx = j;
-          break;
-        }
-      }
-
-      if (resultIdx != null) {
-        final res = toolEvents[resultIdx];
-        consumed.add(resultIdx);
-        chips.add(
-          _ToolChip(
-            key: ValueKey('tc_${i}_r'),
-            toolName: ev.name,
-            status: res.isError ? '失败' : '成功',
-            content: res.resultText,
-          ),
-        );
-      } else {
-        chips.add(
-          _ToolChip(
-            key: ValueKey('tc_$i'),
-            toolName: ev.name,
-            status: null,
-            isLoading: !isFinal,
-          ),
-        );
-      }
-    }
-  }
-
-  if (chips.isEmpty) return const SizedBox.shrink();
-  return Padding(
-    padding: const EdgeInsets.symmetric(vertical: 4),
-    child: _ToolGroupPanel(
-      key: ValueKey('streaming_tools_${toolEvents.length}_$isFinal'),
-      chips: chips,
-      forceExpanded: !isFinal,
-    ),
-  );
 }
 
 /// Transient status label (compaction, retry, etc.).
@@ -868,16 +1028,16 @@ List<Widget> _buildHistoryPartWidgets(
     switch (part.type) {
       case MessagePartType.text:
         if (part.text != null && part.text!.trim().isNotEmpty) {
+          final style = theme.textTheme.bodyMedium?.copyWith(
+            height: 1.6,
+            color: cs.onSurface.withValues(alpha: 0.85),
+          );
           widgets.add(
             RepaintBoundary(
               key: ValueKey('ht_$i'),
-              child: PiMarkdown(
-                part.text!,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  height: 1.6,
-                  color: cs.onSurface.withValues(alpha: 0.85),
-                ),
-              ),
+              child: !isFinal
+                  ? _LivePlainText(text: part.text!, style: style)
+                  : PiMarkdown(part.text!, style: style),
             ),
           );
         }
@@ -887,7 +1047,7 @@ List<Widget> _buildHistoryPartWidgets(
           widgets.add(
             RepaintBoundary(
               key: ValueKey('hthink_$i'),
-              child: _ThinkingBlock(text: part.text!),
+              child: _ThinkingBlock(text: part.text!, isLive: !isFinal),
             ),
           );
         }
@@ -897,7 +1057,8 @@ List<Widget> _buildHistoryPartWidgets(
           _ToolChip(
             key: ValueKey('htc_$i'),
             toolName: part.name ?? '?',
-            status: '成功',
+            status: isFinal ? '成功' : null,
+            isLoading: !isFinal,
           ),
         );
         break;
@@ -925,6 +1086,18 @@ List<Widget> _buildHistoryPartWidgets(
   }
 
   return widgets;
+}
+
+class _LivePlainText extends StatelessWidget {
+  final String text;
+  final TextStyle? style;
+
+  const _LivePlainText({required this.text, required this.style});
+
+  @override
+  Widget build(BuildContext context) {
+    return SelectionArea(child: Text(text, style: style));
+  }
 }
 
 class _StatusLabel extends StatelessWidget {
@@ -1063,7 +1236,7 @@ class _CollapsedTurnRow extends StatelessWidget {
                       ),
                       if (toolCount > 0)
                         Text(
-                          toolCount == 1 ? '1 tool' : '$toolCount tools',
+                          '$toolCount 个工具',
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: cs.onSurfaceVariant.withValues(alpha: 0.4),
                             fontSize: 10,
@@ -1124,6 +1297,28 @@ class _AgentTurnWidget extends StatelessWidget {
                 style: theme.textTheme.labelMedium?.copyWith(
                   color: theme.colorScheme.primary,
                   fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Spacer(),
+              // 复制整轮回复（避免与正文 SelectionArea 的长按手势冲突）。
+              InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () {
+                  final text = messages
+                      .map(_messagePlainText)
+                      .where((t) => t.isNotEmpty)
+                      .join('\n\n');
+                  _copyMessage(context, text);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(
+                    Icons.copy_rounded,
+                    size: 15,
+                    color: theme.colorScheme.onSurfaceVariant.withValues(
+                      alpha: 0.5,
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -1245,20 +1440,13 @@ class _MessageItem extends StatelessWidget {
               bottomLeft: Radius.circular(12),
               bottomRight: Radius.circular(2),
             ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
-                blurRadius: 4,
-                offset: const Offset(0, 2),
-              ),
-            ],
           ),
           child: PiMarkdown(
             message.text,
             inverted: true,
             dense: true,
             style: theme.textTheme.bodyMedium?.copyWith(
-              color: Colors.white,
+              color: cs.onPrimary,
               height: 1.4,
             ),
           ),
@@ -1365,7 +1553,9 @@ class _MessageItem extends StatelessWidget {
 
 class _ThinkingBlock extends StatefulWidget {
   final String text;
-  const _ThinkingBlock({required this.text});
+  final bool isLive;
+
+  const _ThinkingBlock({required this.text, this.isLive = false});
 
   @override
   State<_ThinkingBlock> createState() => _ThinkingBlockState();
@@ -1484,109 +1674,29 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
         ),
         Padding(
           padding: const EdgeInsets.only(left: 20, top: 2, bottom: 8),
-          child: PiMarkdown(
-            widget.text,
-            dense: true,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75),
-              fontStyle: FontStyle.italic,
-              height: 1.5,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Collapsible tool-call group panel — howcode-style "Tool calls (N)".
-/// Wraps a list of _ToolChip children in a single expandable container.
-class _ToolGroupPanel extends StatefulWidget {
-  final List<Widget> chips;
-  final bool forceExpanded;
-
-  const _ToolGroupPanel({
-    super.key,
-    required this.chips,
-    this.forceExpanded = false,
-  });
-
-  @override
-  State<_ToolGroupPanel> createState() => _ToolGroupPanelState();
-}
-
-class _ToolGroupPanelState extends State<_ToolGroupPanel> {
-  bool _expanded = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _expanded = widget.forceExpanded;
-  }
-
-  @override
-  void didUpdateWidget(covariant _ToolGroupPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.forceExpanded && !_expanded) {
-      setState(() => _expanded = true);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-    final count = widget.chips.length;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: widget.forceExpanded
-              ? null
-              : () => setState(() => _expanded = !_expanded),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.build_outlined,
-                  size: 13,
-                  color: cs.onSurfaceVariant.withValues(alpha: 0.35),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  count == 1 ? '1 tool' : '$count tools',
+          child: widget.isLive
+              ? _LivePlainText(
+                  text: widget.text,
                   style: theme.textTheme.bodySmall?.copyWith(
-                    fontSize: 11,
-                    color: cs.onSurfaceVariant.withValues(alpha: 0.45),
-                    fontWeight: FontWeight.w500,
+                    color: theme.colorScheme.onSurfaceVariant.withValues(
+                      alpha: 0.75,
+                    ),
+                    fontStyle: FontStyle.italic,
+                    height: 1.5,
+                  ),
+                )
+              : PiMarkdown(
+                  widget.text,
+                  dense: true,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant.withValues(
+                      alpha: 0.75,
+                    ),
+                    fontStyle: FontStyle.italic,
+                    height: 1.5,
                   ),
                 ),
-                if (!widget.forceExpanded) ...[
-                  const SizedBox(width: 2),
-                  Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 13,
-                    color: cs.onSurfaceVariant.withValues(alpha: 0.35),
-                  ),
-                ],
-              ],
-            ),
-          ),
         ),
-        if (_expanded)
-          Padding(
-            padding: const EdgeInsets.only(left: 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: widget.chips,
-            ),
-          ),
       ],
     );
   }
@@ -1658,6 +1768,7 @@ class _ToolChipState extends State<_ToolChip> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final tokens = theme.appTokens;
     final isRunning = widget.isLoading;
     final isSkill = widget.status == 'skill';
     final isSuccess =
@@ -1684,7 +1795,7 @@ class _ToolChipState extends State<_ToolChip> {
         ? Icon(
             Icons.check_circle_outline,
             size: 10,
-            color: Colors.green.withValues(alpha: 0.7),
+            color: tokens.statusRunning.withValues(alpha: 0.7),
           )
         : isError
         ? Icon(
@@ -1797,22 +1908,20 @@ class _InputBar extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final NodeState? node;
-  final bool isSteer;
   final bool isRunning;
   final String? selectedModel;
-  final VoidCallback onSteerToggle;
   final ValueChanged<String?> onModelChanged;
+  final bool keyboardOpen;
   final VoidCallback onSend;
 
   const _InputBar({
     required this.controller,
     required this.focusNode,
     required this.node,
-    required this.isSteer,
     required this.isRunning,
     this.selectedModel,
-    required this.onSteerToggle,
     required this.onModelChanged,
+    required this.keyboardOpen,
     required this.onSend,
   });
 
@@ -1822,13 +1931,15 @@ class _InputBar extends StatelessWidget {
     final cs = theme.colorScheme;
     final models = node?.piModels ?? const <PiModelInfo>[];
     final actions = _composerActions(context, models);
+    final mediaQuery = MediaQuery.of(context);
 
     return Container(
+      key: const ValueKey('task-detail-input-bar'),
       padding: EdgeInsets.only(
         left: 16,
         right: 16,
         top: 10,
-        bottom: MediaQuery.of(context).padding.bottom + 10,
+        bottom: keyboardOpen ? 10 : mediaQuery.padding.bottom + 10,
       ),
       decoration: BoxDecoration(
         color: cs.surface,
@@ -1858,7 +1969,8 @@ class _InputBar extends StatelessWidget {
                 return _ComposerChip(
                   label: action.label,
                   icon: action.icon,
-                  selected: action.selected,
+                  selected: false,
+                  tooltip: action.tooltip,
                   onTap: action.onTap,
                 );
               },
@@ -1871,13 +1983,6 @@ class _InputBar extends StatelessWidget {
               color: cs.surface,
               borderRadius: BorderRadius.circular(28),
               border: Border.all(color: cs.outlineVariant),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.06),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
             ),
             child: Row(
               children: [
@@ -1888,11 +1993,9 @@ class _InputBar extends StatelessWidget {
                     focusNode: focusNode,
                     minLines: 1,
                     maxLines: 4,
-                    textInputAction: TextInputAction.send,
+                    textInputAction: TextInputAction.newline,
                     decoration: InputDecoration(
-                      hintText: isRunning
-                          ? (isSteer ? '中途纠正方向...' : '发消息...')
-                          : '发消息...',
+                      hintText: isRunning ? '中途纠正方向...' : '继续这个会话...',
                       hintStyle: theme.textTheme.titleMedium?.copyWith(
                         color: cs.onSurfaceVariant.withValues(alpha: 0.42),
                         fontWeight: FontWeight.w500,
@@ -1901,7 +2004,6 @@ class _InputBar extends StatelessWidget {
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(vertical: 14),
                     ),
-                    onSubmitted: (_) => onSend(),
                   ),
                 ),
                 ValueListenableBuilder<TextEditingValue>(
@@ -1936,9 +2038,10 @@ class _InputBar extends StatelessWidget {
       // 模型选择器占位（由 itemBuilder 特殊处理）
       _ComposerAction.modelPicker(),
       _ComposerAction(
-        label: isRunning ? (isSteer ? '调校' : '追加') : '追加',
-        selected: isRunning && isSteer,
-        onTap: isRunning ? onSteerToggle : () => _insertPrompt(''),
+        label: isRunning ? '纠偏' : '继续',
+        icon: isRunning ? Icons.alt_route_rounded : Icons.add_comment_outlined,
+        tooltip: isRunning ? '当前发送会立即纠正运行中的 Agent' : '当前发送会作为会话后续消息',
+        onTap: () => _insertPrompt(''),
       ),
     ];
 
@@ -1975,95 +2078,11 @@ class _InputBar extends StatelessWidget {
       showDragHandle: true,
       isScrollControlled: true,
       builder: (sheetContext) {
-        final theme = Theme.of(sheetContext);
-        final cs = theme.colorScheme;
-        final items = commands;
-
-        return SafeArea(
-          child: SizedBox(
-            height: MediaQuery.sizeOf(sheetContext).height * 0.56,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-                  child: Row(
-                    children: [
-                      Icon(Icons.terminal, size: 18, color: cs.primary),
-                      const SizedBox(width: 8),
-                      Text(
-                        '选择命令',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Divider(height: 1, color: cs.outlineVariant),
-                Expanded(
-                  child: items.isEmpty
-                      ? ListView(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          children: [
-                            _CommandListTile(
-                              title: '/',
-                              description: '插入 slash command 前缀',
-                              icon: Icons.terminal,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                _insertPrompt('/');
-                              },
-                            ),
-                            _CommandListTile(
-                              title: 'SKILL',
-                              description: '插入 skill 标签模板',
-                              icon: Icons.bolt_outlined,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                _insertPrompt('<skill></skill> ');
-                              },
-                            ),
-                          ],
-                        )
-                      : ListView.separated(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          itemCount: items.length,
-                          separatorBuilder: (_, _) => Divider(
-                            height: 1,
-                            indent: 56,
-                            color: cs.outlineVariant.withValues(alpha: 0.55),
-                          ),
-                          itemBuilder: (context, index) {
-                            final command = items[index];
-                            final isSkill =
-                                command.source.toLowerCase() == 'skill';
-                            final commandDescription = command.description
-                                .trim();
-                            final fallbackDescription = isSkill
-                                ? '插入 skill 命令'
-                                : '插入 slash command';
-                            final description = commandDescription.isEmpty
-                                ? fallbackDescription
-                                : commandDescription;
-
-                            return _CommandListTile(
-                              title: _commandTitle(command),
-                              description: description,
-                              icon: isSkill
-                                  ? Icons.bolt_outlined
-                                  : Icons.terminal,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                _insertPrompt(_commandInsertion(command));
-                              },
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          ),
+        return _DetailCommandSheet(
+          commands: commands,
+          commandTitle: _commandTitle,
+          commandInsertion: _commandInsertion,
+          onInsertPrompt: _insertPrompt,
         );
       },
     );
@@ -2091,16 +2110,16 @@ class _InputBar extends StatelessWidget {
 
 class _ComposerAction {
   final String label;
-  final bool selected;
   final bool isModelPicker;
   final IconData? icon;
+  final String? tooltip;
   final VoidCallback onTap;
 
   const _ComposerAction({
     required this.label,
-    this.selected = false,
     this.isModelPicker = false,
     this.icon,
+    this.tooltip,
     required this.onTap,
   });
 
@@ -2251,12 +2270,14 @@ class _ComposerChip extends StatelessWidget {
   final String label;
   final IconData? icon;
   final bool selected;
+  final String? tooltip;
   final VoidCallback onTap;
 
   const _ComposerChip({
     required this.label,
     this.icon,
     required this.selected,
+    this.tooltip,
     required this.onTap,
   });
 
@@ -2269,7 +2290,7 @@ class _ComposerChip extends StatelessWidget {
         ? cs.primaryContainer.withValues(alpha: 0.45)
         : cs.surface;
 
-    return Material(
+    final chip = Material(
       color: background,
       borderRadius: BorderRadius.circular(10),
       child: InkWell(
@@ -2300,6 +2321,159 @@ class _ComposerChip extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+
+    if (tooltip == null) return chip;
+    return Tooltip(message: tooltip!, child: chip);
+  }
+}
+
+/// 命令选择面板（带搜索过滤）。
+class _DetailCommandSheet extends StatefulWidget {
+  final List<PiSlashCommandInfo> commands;
+  final String Function(PiSlashCommandInfo) commandTitle;
+  final String Function(PiSlashCommandInfo) commandInsertion;
+  final ValueChanged<String> onInsertPrompt;
+
+  const _DetailCommandSheet({
+    required this.commands,
+    required this.commandTitle,
+    required this.commandInsertion,
+    required this.onInsertPrompt,
+  });
+
+  @override
+  State<_DetailCommandSheet> createState() => _DetailCommandSheetState();
+}
+
+class _DetailCommandSheetState extends State<_DetailCommandSheet> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final q = _query.trim().toLowerCase();
+    final filtered = q.isEmpty
+        ? widget.commands
+        : widget.commands
+              .where(
+                (c) =>
+                    c.name.toLowerCase().contains(q) ||
+                    c.description.toLowerCase().contains(q),
+              )
+              .toList();
+
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.56,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: Row(
+                children: [
+                  Icon(Icons.terminal, size: 18, color: cs.primary),
+                  const SizedBox(width: 8),
+                  Text(
+                    '选择命令',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (widget.commands.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                child: TextField(
+                  onChanged: (v) => setState(() => _query = v),
+                  decoration: InputDecoration(
+                    prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                    hintText: '搜索命令…',
+                    isDense: true,
+                    filled: true,
+                    fillColor: cs.surfaceContainerLow,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+            Divider(height: 1, color: cs.outlineVariant),
+            Expanded(
+              child: widget.commands.isEmpty
+                  ? ListView(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      children: [
+                        _CommandListTile(
+                          title: '/',
+                          description: '插入 slash command 前缀',
+                          icon: Icons.terminal,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            widget.onInsertPrompt('/');
+                          },
+                        ),
+                        _CommandListTile(
+                          title: 'SKILL',
+                          description: '插入 skill 标签模板',
+                          icon: Icons.bolt_outlined,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            widget.onInsertPrompt('<skill></skill> ');
+                          },
+                        ),
+                      ],
+                    )
+                  : filtered.isEmpty
+                  ? Center(
+                      child: Text(
+                        '没有匹配的命令',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: cs.onSurface.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: filtered.length,
+                      separatorBuilder: (_, _) => Divider(
+                        height: 1,
+                        indent: 56,
+                        color: cs.outlineVariant.withValues(alpha: 0.55),
+                      ),
+                      itemBuilder: (context, index) {
+                        final command = filtered[index];
+                        final isSkill = command.source.toLowerCase() == 'skill';
+                        final commandDescription = command.description.trim();
+                        final fallbackDescription = isSkill
+                            ? '插入 skill 命令'
+                            : '插入 slash command';
+                        final description = commandDescription.isEmpty
+                            ? fallbackDescription
+                            : commandDescription;
+
+                        return _CommandListTile(
+                          title: widget.commandTitle(command),
+                          description: description,
+                          icon: isSkill ? Icons.bolt_outlined : Icons.terminal,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            widget.onInsertPrompt(
+                              widget.commandInsertion(command),
+                            );
+                          },
+                        );
+                      },
+                    ),
+            ),
+          ],
         ),
       ),
     );

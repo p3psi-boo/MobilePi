@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:mobilepi_node/agent/agent_runner.dart';
 import 'package:mobilepi_node/daemon.dart';
+import 'package:mobilepi_node/persistence/node_db.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
@@ -121,6 +122,181 @@ void main() {
     );
 
     expect(update.payload.containsKey('lastMsgId'), isFalse);
+
+    await sub.cancel();
+    await ws.close();
+    await daemon.stop();
+    await tempDir.delete(recursive: true);
+  });
+
+  test(
+    'task output delta preserves long payloads without truncation',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'mobilepi_daemon_long_delta_test_',
+      );
+      final dbPath = p.join(tempDir.path, 'node.db');
+      final port = 20500 + DateTime.now().millisecond;
+      final runner = FakeAgentRunner();
+      final daemon = NodeDaemon(
+        port: port,
+        dbPath: dbPath,
+        runnerFactory: (_) => runner,
+      );
+
+      unawaited(daemon.start());
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+      final events = <MobilePiMessage>[];
+      final sub = ws
+          .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+          .listen(events.add);
+      final taskId = const Uuid().v4();
+
+      ws.add(
+        jsonEncode(
+          MobilePiMessage(
+            messageId: const Uuid().v4(),
+            from: 'client',
+            to: 'node:test',
+            type: MessageType.command,
+            payload: {
+              ProtocolPayloadKeys.commandType: 'task.create',
+              ProtocolPayloadKeys.requestId: const Uuid().v4(),
+              'taskId': taskId,
+              'agentType': 'pi',
+              'prompt': 'emit long output',
+            },
+          ).toJson(),
+        ),
+      );
+
+      await _waitFor(
+        events,
+        (m) =>
+            m.type == MessageType.event &&
+            _eventPayload(m)['taskId'] == taskId &&
+            _eventPayload(m)['streamingDelta'] == 'started',
+        timeout: const Duration(seconds: 5),
+        label: 'long-output task started event',
+      );
+
+      final longDelta = 'x' * 24000;
+      runner.emitStreamingText(longDelta);
+
+      final update = await _waitFor(
+        events,
+        (m) =>
+            m.type == MessageType.event &&
+            _eventPayload(m)['taskId'] == taskId &&
+            _eventPayload(m)['streamingDelta'] == longDelta,
+        timeout: const Duration(seconds: 5),
+        label: 'untruncated long delta event',
+      );
+
+      final delta = _eventPayload(update)['streamingDelta'] as String;
+      expect(delta, hasLength(longDelta.length));
+      expect(delta, isNot(contains('...(truncated)...')));
+
+      await sub.cancel();
+      await ws.close();
+      await daemon.stop();
+      await tempDir.delete(recursive: true);
+    },
+  );
+
+  test('live tool events preserve call ids in protocol payloads', () async {
+    final tempDir = await Directory.systemTemp.createTemp(
+      'mobilepi_daemon_tool_event_test_',
+    );
+    final dbPath = p.join(tempDir.path, 'node.db');
+    final port = 20600 + DateTime.now().millisecond;
+    final runner = FakeAgentRunner();
+    final daemon = NodeDaemon(
+      port: port,
+      dbPath: dbPath,
+      runnerFactory: (_) => runner,
+    );
+
+    unawaited(daemon.start());
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+    final events = <MobilePiMessage>[];
+    final sub = ws
+        .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+        .listen(events.add);
+    final taskId = const Uuid().v4();
+
+    ws.add(
+      jsonEncode(
+        MobilePiMessage(
+          messageId: const Uuid().v4(),
+          from: 'client',
+          to: 'node:test',
+          type: MessageType.command,
+          payload: {
+            ProtocolPayloadKeys.commandType: 'task.create',
+            ProtocolPayloadKeys.requestId: const Uuid().v4(),
+            'taskId': taskId,
+            'agentType': 'pi',
+            'prompt': 'emit tool events',
+          },
+        ).toJson(),
+      ),
+    );
+
+    await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.event &&
+          _eventPayload(m)['taskId'] == taskId &&
+          _eventPayload(m)['streamingDelta'] == 'started',
+      timeout: const Duration(seconds: 5),
+      label: 'tool task started event',
+    );
+
+    runner.emitToolCall('call-1', 'read_file');
+    final toolCallEvent = await _waitFor(
+      events,
+      (m) {
+        if (m.type != MessageType.event) return false;
+        final payload = _eventPayload(m);
+        final toolCall = payload[ProtocolPayloadKeys.toolCall];
+        return payload['taskId'] == taskId &&
+            toolCall is Map &&
+            toolCall['id'] == 'call-1';
+      },
+      timeout: const Duration(seconds: 5),
+      label: 'tool call event',
+    );
+
+    runner.emitToolResult('call-1', 'read_file', 'file contents');
+    final toolResultEvent = await _waitFor(
+      events,
+      (m) {
+        if (m.type != MessageType.event) return false;
+        final payload = _eventPayload(m);
+        final toolResult = payload[ProtocolPayloadKeys.toolResult];
+        return payload['taskId'] == taskId &&
+            toolResult is Map &&
+            toolResult['id'] == 'call-1';
+      },
+      timeout: const Duration(seconds: 5),
+      label: 'tool result event',
+    );
+
+    final toolCall = Map<String, dynamic>.from(
+      _eventPayload(toolCallEvent)[ProtocolPayloadKeys.toolCall] as Map,
+    );
+    final toolResult = Map<String, dynamic>.from(
+      _eventPayload(toolResultEvent)[ProtocolPayloadKeys.toolResult] as Map,
+    );
+    expect(toolCall, containsPair('name', 'read_file'));
+    expect(toolResult, containsPair('name', 'read_file'));
+    expect(toolResult, containsPair('text', 'file contents'));
+    expect(toolResult, containsPair('isError', false));
 
     await sub.cancel();
     await ws.close();
@@ -361,6 +537,182 @@ void main() {
     await tempDir.delete(recursive: true);
   });
 
+  test('external session watcher preserves split UTF-8 lines', () async {
+    final tempDir = await Directory.systemTemp.createTemp(
+      'mobilepi_daemon_utf8_tail_test_',
+    );
+    final dbPath = p.join(tempDir.path, 'node.db');
+    final sessionPath = p.join(tempDir.path, 'session.jsonl');
+    await File(sessionPath).writeAsString('');
+    final port = 23600 + DateTime.now().millisecond;
+    final runner = FakeAgentRunner();
+    final daemon = NodeDaemon(
+      port: port,
+      dbPath: dbPath,
+      runnerFactory: (_) => runner,
+    );
+
+    unawaited(daemon.start());
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+    final events = <MobilePiMessage>[];
+    final sub = ws
+        .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+        .listen(events.add);
+    final taskId = const Uuid().v4();
+
+    ws.add(
+      jsonEncode(
+        MobilePiMessage(
+          messageId: const Uuid().v4(),
+          from: 'client',
+          to: 'node:test',
+          type: MessageType.command,
+          payload: {
+            ProtocolPayloadKeys.commandType: 'task.follow_up',
+            ProtocolPayloadKeys.requestId: const Uuid().v4(),
+            'taskId': taskId,
+            ProtocolPayloadKeys.sessionPath: sessionPath,
+            'message': 'resume and watch utf8',
+          },
+        ).toJson(),
+      ),
+    );
+
+    await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.event &&
+          _eventPayload(m)['taskId'] == taskId &&
+          (_eventPayload(m)['streamingDelta'] as String? ?? '').contains(
+            'prompt:resume and watch utf8',
+          ),
+      timeout: const Duration(seconds: 5),
+      label: 'utf8 resume prompt event',
+    );
+
+    final line =
+        '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"中文 live delta"}]}}\n';
+    final bytes = utf8.encode(line);
+    final splitAt = bytes.indexOf(0xe4) + 1;
+    expect(splitAt, greaterThan(0));
+    final file = File(sessionPath);
+    await file.writeAsBytes(
+      bytes.take(splitAt).toList(),
+      mode: FileMode.append,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await file.writeAsBytes(
+      bytes.skip(splitAt).toList(),
+      mode: FileMode.append,
+    );
+
+    await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.event &&
+          _eventPayload(m)['taskId'] == taskId &&
+          (_eventPayload(m)['streamingDelta'] as String? ?? '') ==
+              '中文 live delta',
+      timeout: const Duration(seconds: 8),
+      label: 'split utf8 session delta event',
+    );
+
+    await sub.cancel();
+    await ws.close();
+    await daemon.stop();
+    await tempDir.delete(recursive: true);
+  });
+
+  test(
+    'external session watcher emits identical deltas from distinct lines',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'mobilepi_daemon_tail_offset_dedupe_test_',
+      );
+      final dbPath = p.join(tempDir.path, 'node.db');
+      final sessionPath = p.join(tempDir.path, 'session.jsonl');
+      await File(sessionPath).writeAsString('');
+      final port = 23700 + DateTime.now().millisecond;
+      final runner = FakeAgentRunner();
+      final daemon = NodeDaemon(
+        port: port,
+        dbPath: dbPath,
+        runnerFactory: (_) => runner,
+      );
+
+      unawaited(daemon.start());
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+      final events = <MobilePiMessage>[];
+      final sub = ws
+          .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+          .listen(events.add);
+      final taskId = const Uuid().v4();
+
+      ws.add(
+        jsonEncode(
+          MobilePiMessage(
+            messageId: const Uuid().v4(),
+            from: 'client',
+            to: 'node:test',
+            type: MessageType.command,
+            payload: {
+              ProtocolPayloadKeys.commandType: 'task.follow_up',
+              ProtocolPayloadKeys.requestId: const Uuid().v4(),
+              'taskId': taskId,
+              ProtocolPayloadKeys.sessionPath: sessionPath,
+              'message': 'resume and watch repeated lines',
+            },
+          ).toJson(),
+        ),
+      );
+
+      await _waitFor(
+        events,
+        (m) =>
+            m.type == MessageType.event &&
+            _eventPayload(m)['taskId'] == taskId &&
+            (_eventPayload(m)['streamingDelta'] as String? ?? '').contains(
+              'prompt:resume and watch repeated lines',
+            ),
+        timeout: const Duration(seconds: 5),
+        label: 'repeated-lines resume prompt event',
+      );
+
+      const repeatedLine =
+          '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"same live delta"}]}}\n';
+      await File(
+        sessionPath,
+      ).writeAsString('$repeatedLine$repeatedLine', mode: FileMode.append);
+
+      await _waitFor(
+        events,
+        (m) =>
+            events
+                .where(
+                  (event) =>
+                      event.type == MessageType.event &&
+                      _eventPayload(event)['taskId'] == taskId &&
+                      (_eventPayload(event)['streamingDelta'] as String? ??
+                              '') ==
+                          'same live delta',
+                )
+                .length >=
+            2,
+        timeout: const Duration(seconds: 8),
+        label: 'two identical session delta events',
+      );
+
+      await sub.cancel();
+      await ws.close();
+      await daemon.stop();
+      await tempDir.delete(recursive: true);
+    },
+  );
+
   test(
     'protocol command events are persisted and replayed by cursor',
     () async {
@@ -460,6 +812,109 @@ void main() {
     },
   );
 
+  test('resume paginates replay events with hasMore', () async {
+    final tempDir = await Directory.systemTemp.createTemp(
+      'mobilepi_daemon_resume_pagination_test_',
+    );
+    final dbPath = p.join(tempDir.path, 'node.db');
+    final db = NodeDatabase(dbPath: dbPath);
+    await db.initialize();
+    db.upsertTask(
+      taskId: 'bulk',
+      streamId: 'task:bulk',
+      agentType: 'pi',
+      title: 'Bulk replay',
+      status: 'running',
+    );
+    for (var i = 1; i <= 501; i++) {
+      db.appendEvent(
+        streamId: 'task:bulk',
+        type: 'task.output.delta',
+        payload: {
+          'taskId': 'bulk',
+          'status': 'running',
+          'streamingDelta': '$i\n',
+        },
+      );
+    }
+    db.close();
+
+    final port = 24000 + DateTime.now().millisecond;
+    final daemon = NodeDaemon(
+      port: port,
+      dbPath: dbPath,
+      runnerFactory: (_) => FakeAgentRunner(),
+    );
+
+    unawaited(daemon.start());
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final ws = await WebSocket.connect('ws://127.0.0.1:$port/ws');
+    final events = <MobilePiMessage>[];
+    final sub = ws
+        .map((e) => MobilePiMessage.fromJson(jsonDecode(e as String)))
+        .listen(events.add);
+
+    ws.add(
+      jsonEncode(
+        MobilePiMessage(
+          messageId: 'resume-page-1',
+          from: 'client',
+          to: 'node:test',
+          type: MessageType.resume,
+          payload: {
+            ProtocolPayloadKeys.cursors: {'task:bulk': 0},
+          },
+        ).toJson(),
+      ),
+    );
+
+    final first = await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.response &&
+          m.payload[ProtocolPayloadKeys.responseTo] == 'resume-page-1',
+      timeout: const Duration(seconds: 5),
+      label: 'first resume page',
+    );
+    final firstEvents = first.payload[ProtocolPayloadKeys.events] as List;
+    expect(firstEvents, hasLength(500));
+    expect(first.payload[ProtocolPayloadKeys.hasMore], isTrue);
+    expect(firstEvents.last[ProtocolPayloadKeys.seq], 500);
+
+    ws.add(
+      jsonEncode(
+        MobilePiMessage(
+          messageId: 'resume-page-2',
+          from: 'client',
+          to: 'node:test',
+          type: MessageType.resume,
+          payload: {
+            ProtocolPayloadKeys.cursors: {'task:bulk': 500},
+          },
+        ).toJson(),
+      ),
+    );
+
+    final second = await _waitFor(
+      events,
+      (m) =>
+          m.type == MessageType.response &&
+          m.payload[ProtocolPayloadKeys.responseTo] == 'resume-page-2',
+      timeout: const Duration(seconds: 5),
+      label: 'second resume page',
+    );
+    final secondEvents = second.payload[ProtocolPayloadKeys.events] as List;
+    expect(secondEvents, hasLength(1));
+    expect(second.payload[ProtocolPayloadKeys.hasMore], isFalse);
+    expect(secondEvents.single[ProtocolPayloadKeys.seq], 501);
+
+    await sub.cancel();
+    await ws.close();
+    await daemon.stop();
+    await tempDir.delete(recursive: true);
+  });
+
   test('responses are addressed to the requesting client', () async {
     final tempDir = await Directory.systemTemp.createTemp(
       'mobilepi_daemon_reply_target_test_',
@@ -535,6 +990,30 @@ class FakeAgentRunner implements AgentRunner {
     _running = true;
     _controller.add(
       const AgentEvent(state: AgentRunState.running, streamingText: 'started'),
+    );
+  }
+
+  void emitStreamingText(String text) {
+    _controller.add(
+      AgentEvent(state: AgentRunState.running, streamingText: text),
+    );
+  }
+
+  void emitToolCall(String id, String name) {
+    _controller.add(
+      AgentEvent(state: AgentRunState.running, toolCallId: id, toolName: name),
+    );
+  }
+
+  void emitToolResult(String id, String name, String text) {
+    _controller.add(
+      AgentEvent(
+        state: AgentRunState.running,
+        toolCallId: id,
+        toolName: name,
+        toolResult: text,
+        toolResultIsError: false,
+      ),
     );
   }
 

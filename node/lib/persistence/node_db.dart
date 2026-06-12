@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:logging/logging.dart';
+import 'package:mobilepi_shared/mobilepi_shared.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
@@ -298,6 +299,8 @@ class NodeDatabase {
     Map<String, int> cursors, {
     int limit = 500,
   }) {
+    if (limit <= 0) return const <NodeEventRecord>[];
+
     if (cursors.isEmpty) {
       return _eventRows(
         _db.select(
@@ -312,26 +315,140 @@ class NodeDatabase {
       );
     }
 
-    final events = <NodeEventRecord>[];
-    for (final entry in cursors.entries) {
+    _db.execute('''
+      CREATE TEMP TABLE IF NOT EXISTS replay_cursors (
+        stream_id TEXT PRIMARY KEY,
+        seq INTEGER NOT NULL
+      )
+    ''');
+    _db.execute('DELETE FROM replay_cursors');
+    try {
+      for (final entry in cursors.entries) {
+        _db.execute(
+          '''
+          INSERT INTO replay_cursors (stream_id, seq)
+          VALUES (?, ?)
+          ''',
+          [entry.key, entry.value],
+        );
+      }
       final rows = _db.select(
         '''
-        SELECT stream_id, seq, type, payload_json, created_at
-        FROM events
-        WHERE stream_id = ? AND seq > ?
-        ORDER BY seq
+        SELECT e.stream_id, e.seq, e.type, e.payload_json, e.created_at
+        FROM events e
+        LEFT JOIN replay_cursors c ON c.stream_id = e.stream_id
+        WHERE e.seq > COALESCE(c.seq, 0)
+        ORDER BY e.id
         LIMIT ?
         ''',
-        [entry.key, entry.value, limit],
+        [limit],
       );
-      events.addAll(_eventRows(rows));
+      return _eventRows(rows);
+    } catch (e, st) {
+      final log = Logger('NodeDatabase');
+      log.warning('event=db.events_after_failed', e, st);
+      rethrow;
     }
-    events.sort((a, b) {
-      final streamCompare = a.streamId.compareTo(b.streamId);
-      if (streamCompare != 0) return streamCompare;
-      return a.seq.compareTo(b.seq);
-    });
-    return events.take(limit).toList();
+  }
+
+  List<NodeTruncatedStream> truncatedStreams(Map<String, int> cursors) {
+    if (cursors.isEmpty) return const <NodeTruncatedStream>[];
+
+    final truncated = <NodeTruncatedStream>[];
+    for (final entry in cursors.entries) {
+      final streamRows = _db.select(
+        '''
+        SELECT next_seq FROM stream_cursors
+        WHERE stream_id = ?
+        ''',
+        [entry.key],
+      );
+      if (streamRows.isEmpty) continue;
+
+      final nextSeq = streamRows.first['next_seq'] as int;
+      final latestSeq = nextSeq - 1;
+      if (entry.value >= latestSeq) continue;
+
+      final minRows = _db.select(
+        '''
+        SELECT MIN(seq) AS min_seq FROM events
+        WHERE stream_id = ?
+        ''',
+        [entry.key],
+      );
+      final minSeq = minRows.first['min_seq'] as int?;
+      if (minSeq != null && entry.value >= minSeq - 1) continue;
+
+      final snapshot = taskSnapshotForStream(entry.key, seq: latestSeq);
+      truncated.add(
+        NodeTruncatedStream(
+          streamId: entry.key,
+          requestedSeq: entry.value,
+          fromSeq: minSeq,
+          latestSeq: latestSeq,
+          snapshot: snapshot,
+        ),
+      );
+    }
+    return truncated;
+  }
+
+  NodeEventRecord? taskSnapshotForStream(String streamId, {int? seq}) {
+    final rows = _db.select(
+      '''
+      SELECT task_id, stream_id, agent_type, project_path, title, status, model,
+             session_id, session_path, created_at, updated_at
+      FROM tasks
+      WHERE stream_id = ?
+      LIMIT 1
+      ''',
+      [streamId],
+    );
+    if (rows.isEmpty) return null;
+
+    final row = rows.first;
+    final taskId = row['task_id'] as String;
+    final payload = <String, dynamic>{
+      'taskId': taskId,
+      'agentType': row['agent_type'] as String,
+      'status': row['status'] as String,
+      ProtocolPayloadKeys.title: row['title'] as String,
+    };
+    final projectPath = row['project_path'] as String?;
+    if (projectPath != null) {
+      payload[ProtocolPayloadKeys.projectPath] = projectPath;
+    }
+    final model = row['model'] as String?;
+    if (model != null) {
+      payload[ProtocolPayloadKeys.model] = model;
+    }
+    final sessionId = row['session_id'] as String?;
+    if (sessionId != null) {
+      payload['sessionId'] = sessionId;
+    }
+    final sessionPath = row['session_path'] as String?;
+    if (sessionPath != null) {
+      payload[ProtocolPayloadKeys.sessionPath] = sessionPath;
+    }
+    return NodeEventRecord(
+      streamId: streamId,
+      seq: seq ?? _latestSeqForStream(streamId),
+      type: 'task.snapshot',
+      payload: payload,
+      createdAt: row['updated_at'] as String,
+    );
+  }
+
+  int _latestSeqForStream(String streamId) {
+    final rows = _db.select(
+      '''
+      SELECT next_seq FROM stream_cursors
+      WHERE stream_id = ?
+      ''',
+      [streamId],
+    );
+    if (rows.isEmpty) return 0;
+    return (rows.first['next_seq'] as int) - 1;
   }
 
   Map<String, dynamic>? commandResult(String requestId) {
@@ -387,7 +504,10 @@ class NodeDatabase {
 
   /// Purge old events to prevent unbounded DB growth.
   void purgeOldEvents({int maxAgeDays = 7, int keepPerStream = 500}) {
-    final cutoff = DateTime.now().toUtc().subtract(Duration(days: maxAgeDays)).toIso8601String();
+    final cutoff = DateTime.now()
+        .toUtc()
+        .subtract(Duration(days: maxAgeDays))
+        .toIso8601String();
     _db.execute('DELETE FROM events WHERE created_at < ?', [cutoff]);
   }
 
@@ -421,6 +541,32 @@ class NodeEventRecord {
       'taskId': ?taskId,
       'payload': payload,
       'createdAt': createdAt,
+    };
+  }
+}
+
+class NodeTruncatedStream {
+  final String streamId;
+  final int requestedSeq;
+  final int? fromSeq;
+  final int latestSeq;
+  final NodeEventRecord? snapshot;
+
+  const NodeTruncatedStream({
+    required this.streamId,
+    required this.requestedSeq,
+    required this.fromSeq,
+    required this.latestSeq,
+    required this.snapshot,
+  });
+
+  Map<String, dynamic> toProtocolPayload() {
+    return {
+      ProtocolPayloadKeys.streamId: streamId,
+      'requestedSeq': requestedSeq,
+      'fromSeq': fromSeq,
+      'latestSeq': latestSeq,
+      if (snapshot != null) 'snapshot': snapshot!.toProtocolPayload(),
     };
   }
 }

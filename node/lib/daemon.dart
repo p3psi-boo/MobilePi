@@ -33,9 +33,16 @@ class _SessionWatchState {
   final String taskId;
   final String sessionPath;
   int offset;
-  String partial = '';
-  final Set<String> recentFingerprints = <String>{};
+  List<int> partialBytes = <int>[];
+  final Set<int> recentLineOffsets = <int>{};
   StreamSubscription<FileSystemEvent>? subscription;
+}
+
+class _SessionLineBytes {
+  const _SessionLineBytes({required this.offset, required this.bytes});
+
+  final int offset;
+  final List<int> bytes;
 }
 
 class NodeDaemon {
@@ -65,10 +72,11 @@ class NodeDaemon {
   static const _subscriberTtl = Duration(minutes: 5);
 
   // Hub 连接探活与重连退避（与 client 端 WebSocketService 对齐）。
-  static const _hubHeartbeatInterval = Duration(seconds: 30);
-  static const _maxHubMissedPongs = 3;
+  static const _hubHeartbeatInterval = Duration(seconds: 15);
+  static const _maxHubMissedPongs = 2;
   static const _initialHubBackoff = Duration(seconds: 1);
   static const _maxHubBackoff = Duration(seconds: 30);
+  static const _resumeReplayPageSize = 500;
 
   /// permessage-deflate 压缩协商；可用 env `MOBILE_PI_WS_COMPRESSION=off` 关闭。
   final CompressionOptions _wsCompression = _resolveCompression();
@@ -82,6 +90,9 @@ class NodeDaemon {
         ? CompressionOptions.compressionOff
         : CompressionOptions.compressionDefault;
   }
+
+  static Duration get hubHeartbeatInterval => _hubHeartbeatInterval;
+  static int get maxHubMissedPongs => _maxHubMissedPongs;
 
   final String? dbPath;
   final AgentRunnerFactory _runnerFactory;
@@ -494,17 +505,26 @@ class NodeDaemon {
     _piCapabilitiesLoadedAt = null;
     _refreshPiCapabilitiesIfStale();
     await _piCapabilitiesRefresh;
-    final events = includeEvents
+    final replayPage = includeEvents
+        ? _db!.eventsAfter(cursors, limit: _resumeReplayPageSize + 1)
+        : const <NodeEventRecord>[];
+    final hasMore = replayPage.length > _resumeReplayPageSize;
+    final events = replayPage
+        .take(_resumeReplayPageSize)
+        .map((event) => event.toProtocolPayload())
+        .toList();
+    final truncatedStreams = includeEvents
         ? _db!
-              .eventsAfter(cursors)
-              .map((event) => event.toProtocolPayload())
+              .truncatedStreams(cursors)
+              .map((stream) => stream.toProtocolPayload())
               .toList()
         : const <Map<String, dynamic>>[];
     final payload = <String, dynamic>{
       ProtocolPayloadKeys.responseTo: request.messageId,
       ProtocolPayloadKeys.nodeSummary: _nodeSummaryPayload(),
       ProtocolPayloadKeys.events: events,
-      ProtocolPayloadKeys.truncatedStreams: const <Map<String, dynamic>>[],
+      ProtocolPayloadKeys.hasMore: hasMore,
+      ProtocolPayloadKeys.truncatedStreams: truncatedStreams,
     };
     final response = MobilePiMessage(
       messageId: const Uuid().v4(),
@@ -1047,11 +1067,7 @@ class NodeDaemon {
       };
       if (model != null) resumedFields['model'] = model;
       _logger.info('event=session.resumed ${logFields(resumedFields)}');
-      _sendTaskUpdate(
-        channel,
-        taskId,
-        'running',
-      );
+      _sendTaskUpdate(channel, taskId, 'running');
       return runner;
     } catch (e, st) {
       _logger.warning(
@@ -1090,20 +1106,33 @@ class NodeDaemon {
       try {
         file.createSync(recursive: true);
       } catch (e) {
-        _logger.warning('event=session.watch_file_create_failed path=$sessionPath', e);
+        _logger.warning(
+          'event=session.watch_file_create_failed path=$sessionPath',
+          e,
+        );
       }
     }
 
     try {
-      state.subscription = file.watch(events: FileSystemEvent.modify).listen(
-        (_) => _onSessionFileChanged(state),
-        onError: (Object e) {
-          _logger.warning('event=session.watch_error taskId=$taskId path=$sessionPath', e);
-        },
+      state.subscription = file
+          .watch(events: FileSystemEvent.modify)
+          .listen(
+            (_) => _onSessionFileChanged(state),
+            onError: (Object e) {
+              _logger.warning(
+                'event=session.watch_error taskId=$taskId path=$sessionPath',
+                e,
+              );
+            },
+          );
+      _logger.info(
+        'event=session.watch_started taskId=${shortId(taskId)} path=$sessionPath',
       );
-      _logger.info('event=session.watch_started taskId=${shortId(taskId)} path=$sessionPath');
     } catch (e) {
-      _logger.warning('event=session.watch_setup_failed taskId=$taskId path=$sessionPath', e);
+      _logger.warning(
+        'event=session.watch_setup_failed taskId=$taskId path=$sessionPath',
+        e,
+      );
     }
   }
 
@@ -1114,35 +1143,74 @@ class NodeDaemon {
     final len = file.lengthSync();
     if (len < watch.offset) {
       watch.offset = 0;
-      watch.partial = '';
+      watch.partialBytes = <int>[];
+      watch.recentLineOffsets.clear();
     }
     if (len == watch.offset) return;
     final raf = await file.open();
     try {
+      final readOffset = watch.offset;
       await raf.setPosition(watch.offset);
       final bytes = await raf.read(len - watch.offset);
       watch.offset = len;
-      final chunk = watch.partial + utf8.decode(bytes, allowMalformed: true);
-      final lines = chunk.split('\n');
-      watch.partial = lines.removeLast();
-      for (final line in lines) {
+      final lines = _consumeSessionLineBytes(watch, bytes, readOffset);
+      for (final sessionLine in lines) {
+        if (!watch.recentLineOffsets.add(sessionLine.offset)) continue;
+        if (watch.recentLineOffsets.length > 300) {
+          watch.recentLineOffsets.remove(watch.recentLineOffsets.first);
+        }
+        final line = _decodeSessionLine(sessionLine.bytes);
+        if (line == null) continue;
         final delta = _extractDeltaFromSessionLine(line);
         if (delta == null || delta.isEmpty) continue;
-        final sig = '${watch.taskId}:${delta.hashCode}';
-        if (!watch.recentFingerprints.add(sig)) continue;
-        if (watch.recentFingerprints.length > 300) {
-          watch.recentFingerprints.remove(watch.recentFingerprints.first);
-        }
-        _broadcastTaskUpdate(
-          watch.taskId,
-          'running',
-          streamingDelta: delta,
-        );
+        _broadcastTaskUpdate(watch.taskId, 'running', streamingDelta: delta);
       }
     } catch (e, st) {
-      _logger.warning('event=session.file_read_error taskId=${watch.taskId}', e, st);
+      _logger.warning(
+        'event=session.file_read_error taskId=${watch.taskId}',
+        e,
+        st,
+      );
     } finally {
       await raf.close();
+    }
+  }
+
+  List<_SessionLineBytes> _consumeSessionLineBytes(
+    _SessionWatchState watch,
+    List<int> bytes,
+    int readOffset,
+  ) {
+    final previousPartialLength = watch.partialBytes.length;
+    final chunkStartOffset = readOffset - previousPartialLength;
+    final chunk = <int>[...watch.partialBytes, ...bytes];
+    final lines = <_SessionLineBytes>[];
+    var start = 0;
+    for (var i = 0; i < chunk.length; i++) {
+      if (chunk[i] != 0x0a) continue;
+      var end = i;
+      if (end > start && chunk[end - 1] == 0x0d) end--;
+      lines.add(
+        _SessionLineBytes(
+          offset: chunkStartOffset + start,
+          bytes: chunk.sublist(start, end),
+        ),
+      );
+      start = i + 1;
+    }
+    watch.partialBytes = chunk.sublist(start);
+    return lines;
+  }
+
+  String? _decodeSessionLine(List<int> bytes) {
+    try {
+      return utf8.decode(bytes);
+    } catch (e) {
+      _logger.warning(
+        'event=session.line_decode_error ${logField('byteLength', bytes.length)}',
+        e,
+      );
+      return null;
     }
   }
 
@@ -1180,8 +1248,8 @@ class NodeDaemon {
   }) {
     // 事件追加一次、由 _emitEvent 统一 fan out 到 hub 订阅者 / 所有直连 client，
     // 故此处只调用一次即可（不再按 client 逐个调用，避免重复 appendEvent）。
-    final channel = _hubChannel ??
-        (_clients.isEmpty ? null : _clients.values.first);
+    final channel =
+        _hubChannel ?? (_clients.isEmpty ? null : _clients.values.first);
     if (channel == null) return;
     _sendTaskUpdate(channel, taskId, status, streamingDelta: streamingDelta);
   }
@@ -1214,7 +1282,8 @@ class NodeDaemon {
         taskId: taskId,
         streamId: _taskStreamId(taskId),
         agentType: 'pi',
-        title: 'Pi session ${taskId.length <= 8 ? taskId : taskId.substring(0, 8)}',
+        title:
+            'Pi session ${taskId.length <= 8 ? taskId : taskId.substring(0, 8)}',
         status: 'running',
         sessionPath: sessionPath,
         model: _taskModels[taskId],
@@ -1604,15 +1673,23 @@ class NodeDaemon {
     if (model != null && model.isNotEmpty) {
       payload[ProtocolPayloadKeys.model] = model;
     }
-    if (streamingText != null) payload['streamingText'] = streamingText!.length > 20000 ? '...(truncated)...${streamingText!.substring(streamingText!.length - 20000)}' : streamingText;
-    if (streamingDelta != null) payload['streamingDelta'] = streamingDelta!.length > 20000 ? '...(truncated)...${streamingDelta!.substring(streamingDelta!.length - 20000)}' : streamingDelta;
+    if (streamingText != null) {
+      payload['streamingText'] = streamingText;
+    }
+    if (streamingDelta != null) {
+      payload['streamingDelta'] = streamingDelta;
+    }
     if (progressPercent != null) payload['progressPercent'] = progressPercent;
     if (linesAdded != null) payload['linesAdded'] = linesAdded;
     if (linesRemoved != null) payload['linesRemoved'] = linesRemoved;
     if (toolCall != null) payload[ProtocolPayloadKeys.toolCall] = toolCall;
-    if (toolResult != null) payload[ProtocolPayloadKeys.toolResult] = toolResult;
+    if (toolResult != null) {
+      payload[ProtocolPayloadKeys.toolResult] = toolResult;
+    }
     if (thinking != null) payload[ProtocolPayloadKeys.thinking] = thinking;
-    if (statusLabel != null) payload[ProtocolPayloadKeys.statusLabel] = statusLabel;
+    if (statusLabel != null) {
+      payload[ProtocolPayloadKeys.statusLabel] = statusLabel;
+    }
     return payload;
   }
 

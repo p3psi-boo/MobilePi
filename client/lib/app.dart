@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import 'providers/node_provider.dart';
 import 'screens/dashboard_screen.dart';
+import 'theme/app_tokens.dart';
 
 /// MobilePi 客户端根组件
 ///
@@ -12,63 +13,64 @@ import 'screens/dashboard_screen.dart';
 /// - 极柔和的卡片边框 + 圆角，强调留白
 /// - 顶部 AppBar 与 Surface 颜色融为一体，去掉阴影
 class MobilePiApp extends StatelessWidget {
-  const MobilePiApp({super.key});
+  const MobilePiApp({super.key, this.provider});
 
-  // Claude-style 调色板
-  static const _seed = Color(0xFFD97757); // 暖珊瑚色（Claude 主品牌色）
-
-  static const _lightBg = Color(0xFFF5F2EC); // 暖奶油背景
-  static const _lightSurface = Color(0xFFFAF8F2); // 卡片底
-  static const _lightText = Color(0xFF2C2B26); // 主文本
-
-  static const _darkBg = Color(0xFF1A1815); // 深木色背景
-  static const _darkSurface = Color(0xFF22201D); // 卡片底
-  static const _darkText = Color(0xFFEDEAE3);
+  /// Optional provider override for widget tests. Production uses the default
+  /// `NodeProvider` owned by the root provider.
+  final NodeProvider? provider;
 
   @override
   Widget build(BuildContext context) {
+    const lightTokens = AppTokens.light;
+    const darkTokens = AppTokens.dark;
     final lightColorScheme =
         ColorScheme.fromSeed(
-          seedColor: _seed,
+          seedColor: lightTokens.brandSeed,
           brightness: Brightness.light,
         ).copyWith(
-          surface: _lightBg,
-          surfaceContainerLow: _lightSurface,
-          surfaceContainerLowest: Colors.white,
-          onSurface: _lightText,
+          surface: lightTokens.appSurface,
+          surfaceContainerLow: lightTokens.appSurfaceLow,
+          surfaceContainerLowest: lightTokens.appSurfaceLowest,
+          onSurface: lightTokens.appText,
         );
 
     final darkColorScheme =
         ColorScheme.fromSeed(
-          seedColor: _seed,
+          seedColor: darkTokens.brandSeed,
           brightness: Brightness.dark,
         ).copyWith(
-          surface: _darkBg,
-          surfaceContainerLow: _darkSurface,
-          surfaceContainerLowest: const Color(0xFF1F1D1A),
-          onSurface: _darkText,
+          surface: darkTokens.appSurface,
+          surfaceContainerLow: darkTokens.appSurfaceLow,
+          surfaceContainerLowest: darkTokens.appSurfaceLowest,
+          onSurface: darkTokens.appText,
         );
 
-    return ChangeNotifierProvider(
-      create: (_) => NodeProvider(),
-      child: MaterialApp(
-        title: 'MobilePi',
-        debugShowCheckedModeBanner: false,
-        theme: _buildTheme(lightColorScheme, Brightness.light),
-        darkTheme: _buildTheme(darkColorScheme, Brightness.dark),
-        home: const _AppLifecycleReconnector(child: DashboardScreen()),
-      ),
+    final app = MaterialApp(
+      title: 'MobilePi',
+      debugShowCheckedModeBanner: false,
+      theme: _buildTheme(lightColorScheme, Brightness.light, lightTokens),
+      darkTheme: _buildTheme(darkColorScheme, Brightness.dark, darkTokens),
+      home: const _AppLifecycleReconnector(child: DashboardScreen()),
     );
+
+    final injectedProvider = provider;
+    if (injectedProvider != null) {
+      return ChangeNotifierProvider.value(value: injectedProvider, child: app);
+    }
+
+    return ChangeNotifierProvider(create: (_) => NodeProvider(), child: app);
   }
 
-  ThemeData _buildTheme(ColorScheme cs, Brightness brightness) {
+  ThemeData _buildTheme(
+    ColorScheme cs,
+    Brightness brightness,
+    AppTokens tokens,
+  ) {
     final cardTheme = CardThemeData(
       elevation: 0,
       color: cs.surfaceContainerLow,
       surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 0),
     );
 
@@ -113,7 +115,7 @@ class MobilePiApp extends StatelessWidget {
         space: 0,
       ),
       splashFactory: InkSparkle.splashFactory,
-      extensions: [_buildMarkdownTheme(cs, brightness)],
+      extensions: [tokens, _buildMarkdownTheme(cs, brightness)],
     );
   }
 
@@ -177,8 +179,18 @@ class _AppLifecycleReconnectorState extends State<_AppLifecycleReconnector>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      context.read<NodeProvider>().onAppResumed();
+    switch (state) {
+      case AppLifecycleState.paused:
+        debugPrint('MobilePiLifecycle event=app_paused');
+        break;
+      case AppLifecycleState.resumed:
+        debugPrint('MobilePiLifecycle event=app_resumed');
+        context.read<NodeProvider>().onAppResumed();
+        break;
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.inactive:
+        break;
     }
   }
 

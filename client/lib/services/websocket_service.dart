@@ -12,7 +12,7 @@ import 'ws_connect.dart';
 /// Client 端 WebSocket 连接服务
 ///
 /// - 连接 Hub，而不是直接连接 Daemon
-/// - 心跳间隔 30s，超时判定 3 次未收到 pong
+/// - 心跳间隔 15s，超时判定 2 次未收到 pong
 /// - 断线自动重连（指数退避，最大 30s）
 class WebSocketService {
   static const String _configuredHubUrl = String.fromEnvironment(
@@ -22,8 +22,8 @@ class WebSocketService {
     'MOBILE_PI_TENANT_KEY',
   );
   static const String _defaultHubUrl = 'ws://localhost:8080/ws';
-  static const Duration _heartbeatInterval = Duration(seconds: 30);
-  static const int _maxMissedPongs = 3;
+  static const Duration _heartbeatInterval = Duration(seconds: 15);
+  static const int _maxMissedPongs = 2;
   static const Duration _initialBackoff = Duration(seconds: 1);
   static const Duration _maxBackoff = Duration(seconds: 30);
 
@@ -36,6 +36,8 @@ class WebSocketService {
   bool _connected = false;
   int _missedPongs = 0;
   Duration _backoff = _initialBackoff;
+  final Duration _heartbeatEvery;
+  final int _heartbeatMaxMissedPongs;
   final String _clientId = 'client-${const Uuid().v4()}';
   late String _wsUrl;
   String _tenantKey = _configuredTenantKey.trim();
@@ -49,7 +51,13 @@ class WebSocketService {
   Stream<bool> get connectionStream => _connectionController.stream;
   bool get isConnected => _connected;
 
-  WebSocketService({String? hubUrl, String? tenantKey}) {
+  WebSocketService({
+    String? hubUrl,
+    String? tenantKey,
+    Duration? heartbeatInterval,
+    int? maxMissedPongs,
+  }) : _heartbeatEvery = heartbeatInterval ?? _heartbeatInterval,
+       _heartbeatMaxMissedPongs = maxMissedPongs ?? _maxMissedPongs {
     _wsUrl = normalizeHubUrl(hubUrl ?? defaultHubUrl());
     if (tenantKey != null) {
       _tenantKey = normalizeTenantKey(tenantKey);
@@ -58,6 +66,9 @@ class WebSocketService {
 
   String get hubUrl => _wsUrl;
   String get tenantKey => _tenantKey;
+
+  static Duration get heartbeatInterval => _heartbeatInterval;
+  static int get maxMissedPongs => _maxMissedPongs;
 
   /// 更新 Hub URL（会立即断开当前连接，由调用方决定何时 reconnect）。
   /// 返回归一化后的最终 URL。如果 URL 解析失败会抛 [FormatException]。
@@ -241,12 +252,12 @@ class WebSocketService {
 
   void _startHeartbeat() {
     _cancelHeartbeat();
-    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+    _heartbeatTimer = Timer.periodic(_heartbeatEvery, (_) {
       if (!_connected) return;
 
-      if (_missedPongs >= _maxMissedPongs) {
+      if (_missedPongs >= _heartbeatMaxMissedPongs) {
         _logger.warning(
-          'event=ws.heartbeat_timeout ${logFields({'missedPongs': _missedPongs, 'maxMissedPongs': _maxMissedPongs})}',
+          'event=ws.heartbeat_timeout ${logFields({'missedPongs': _missedPongs, 'maxMissedPongs': _heartbeatMaxMissedPongs})}',
         );
         _channel?.sink.close();
         _onDisconnected();

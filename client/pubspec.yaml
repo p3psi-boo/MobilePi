@@ -26,13 +26,21 @@ dependencies:
     path: ../shared
   font_awesome_flutter: ^11.0.0
   gpt_markdown: ^1.1.7
+  drift: ^2.19.1+1
+  path: ^1.9.1
+  sqlite3: ^3.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_driver:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
   flutter_lints: ^6.0.0
   build_runner: ^2.4.0
   json_serializable: ^6.8.0
+  drift_dev: ^2.19.1
 
 flutter:
   uses-material-design: true

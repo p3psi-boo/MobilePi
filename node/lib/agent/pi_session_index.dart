@@ -123,31 +123,39 @@ class PiSessionIndex {
         };
       }
 
-      final messageLines = <String>[];
+      final messageEntries =
+          <({Map<String, dynamic> entry, Map<String, dynamic> message})>[];
       for (final line in lines) {
         if (line.trim().isEmpty) continue;
-        if (line.contains('"type":"message"')) {
-          messageLines.add(line);
+        if (!line.contains('"type":"message"')) continue;
+
+        try {
+          final entry = jsonDecode(line);
+          if (entry is! Map || entry['type'] != 'message') continue;
+          final entryMap = Map<String, dynamic>.from(entry);
+
+          final rawMessage = entryMap['message'];
+          if (rawMessage is! Map) continue;
+          final message = Map<String, dynamic>.from(rawMessage);
+          messageEntries.add((entry: entryMap, message: message));
+        } catch (e, st) {
+          _logger.warning('event=pi_session_index.parse_error', e, st);
         }
       }
 
-      final totalCount = messageLines.length;
+      final totalCount = messageEntries.length;
       final actualBeforeIndex = beforeIndex ?? totalCount;
       final start = (actualBeforeIndex - limit).clamp(0, totalCount);
       final end = actualBeforeIndex.clamp(0, totalCount);
 
       final messages = <PiSessionMessageInfo>[];
       if (start < end) {
-        final slice = messageLines.sublist(start, end);
-        for (final line in slice) {
+        final slice = messageEntries.sublist(start, end);
+        for (var offset = 0; offset < slice.length; offset++) {
+          final parsed = slice[offset];
           try {
-            final entry = jsonDecode(line);
-            if (entry is! Map || entry['type'] != 'message') continue;
-            final entryMap = Map<String, dynamic>.from(entry);
-
-            final rawMessage = entryMap['message'];
-            if (rawMessage is! Map) continue;
-            final message = Map<String, dynamic>.from(rawMessage);
+            final entryMap = parsed.entry;
+            final message = parsed.message;
             final role = message['role']?.toString();
 
             final contentBlocks = _extractContentBlocks(message);
@@ -177,6 +185,7 @@ class PiSessionIndex {
                         )
                       : null,
                   parts: parts,
+                  sourceIndex: start + offset,
                 ),
               );
             }
@@ -289,10 +298,13 @@ class PiSessionIndex {
                       model: message['model']?.toString(),
                       usage: message['usage'] is Map
                           ? UsageInfo.fromJson(
-                              Map<String, dynamic>.from(message['usage'] as Map),
+                              Map<String, dynamic>.from(
+                                message['usage'] as Map,
+                              ),
                             )
                           : null,
                       parts: parts,
+                      sourceIndex: messageCount - 1,
                     ),
                   );
                 }
@@ -364,9 +376,9 @@ class PiSessionIndex {
 
   /// Build structured parts from Pi JSONL content blocks.
   ///
-  /// Assistant messages only emit text and thinking parts.
-  /// Tool representations come from separate toolResult messages,
-  /// so we skip `toolCall` blocks here to avoid duplicate chips.
+  /// Assistant messages emit text, thinking, and toolCall parts. The Markdown
+  /// fallback still skips tool calls, but structured parts must preserve them so
+  /// historical transcripts keep tool names, ids, and inputs.
   static List<Map<String, dynamic>> _blocksToParts(
     List<Map<String, dynamic>> blocks,
   ) {
@@ -383,9 +395,17 @@ class PiSessionIndex {
         if (thinking != null && thinking.isNotEmpty) {
           parts.add({'type': 'thinking', 'text': thinking});
         }
+      } else if (type == 'toolCall') {
+        final name = block['name']?.toString() ?? block['toolName']?.toString();
+        if (name != null && name.isNotEmpty) {
+          final part = <String, dynamic>{'type': 'toolCall', 'name': name};
+          final id = block['id']?.toString() ?? block['toolCallId']?.toString();
+          if (id != null && id.isNotEmpty) part['id'] = id;
+          final input = block['input'] ?? block['arguments'] ?? block['args'];
+          if (input is Map) part['input'] = Map<String, dynamic>.from(input);
+          parts.add(part);
+        }
       }
-      // toolCall blocks are intentionally omitted — the matching
-      // toolResult message renders the tool chip with full context.
     }
     return parts;
   }
@@ -403,10 +423,15 @@ class PiSessionIndex {
         .map((b) => b['text']?.toString() ?? '')
         .join('\n')
         .trim();
+    final id =
+        message['id']?.toString() ??
+        message['toolCallId']?.toString() ??
+        message['callId']?.toString();
     return [
       {
         'type': 'toolResult',
         'name': toolName,
+        if (id != null && id.isNotEmpty) 'id': id,
         'status': isError ? '失败' : '成功',
         'text': text,
       },

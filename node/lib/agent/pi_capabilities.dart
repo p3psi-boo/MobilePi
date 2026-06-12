@@ -215,6 +215,7 @@ class PiSessionMessageInfo {
   final String? model;
   final UsageInfo? usage;
   final List<Map<String, dynamic>> parts;
+  final int? sourceIndex;
 
   const PiSessionMessageInfo({
     required this.role,
@@ -223,6 +224,7 @@ class PiSessionMessageInfo {
     this.model,
     this.usage,
     this.parts = const [],
+    this.sourceIndex,
   });
 
   Map<String, dynamic> toJson() => {
@@ -232,6 +234,7 @@ class PiSessionMessageInfo {
     if (model != null) 'model': model,
     if (usage != null) 'usage': usage!.toJson(),
     if (parts.isNotEmpty) 'parts': parts,
+    if (sourceIndex != null) 'sourceIndex': sourceIndex,
   };
 }
 

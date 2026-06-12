@@ -162,10 +162,68 @@ Node returns:
     "responseTo": "resume-message-id",
     "nodeSummary": {},
     "events": [],
-    "truncatedStreams": []
+    "hasMore": false,
+    "truncatedStreams": [
+      {
+        "streamId": "task:abc",
+        "requestedSeq": 10,
+        "fromSeq": 14,
+        "latestSeq": 20,
+        "snapshot": {
+          "streamId": "task:abc",
+          "seq": 20,
+          "type": "task.snapshot",
+          "taskId": "abc",
+          "payload": {
+            "taskId": "abc",
+            "agentType": "pi",
+            "title": "Fix login bug",
+            "status": "running",
+            "projectPath": "/repo",
+            "model": "provider/model",
+            "sessionPath": "/home/me/.pi/sessions/abc.jsonl"
+          },
+          "createdAt": "2026-05-20T12:00:00.000Z"
+        }
+      }
+    ]
   }
 }
 ```
+
+Replay ordering is global insertion order, not `streamId` lexical order:
+`NodeDatabase.eventsAfter(cursors)` scans the event log by global `events.id`
+and filters each row with `seq > cursor[streamId]` (unknown streams use cursor
+`0`). When a requested cursor is older than the retained event window for a
+known stream, Node must include a `truncatedStreams` entry. If the task row still
+exists, the entry must include a `task.snapshot` event whose `seq` is the latest
+known stream seq. Node caps each response to the replay page size and sets
+`hasMore: true` when another page remains. Client must apply truncated snapshots
+before replay `events`, then advance the local `(nodeId, streamId)` cursor to
+the snapshot/event seq. If `hasMore` is true, Client immediately sends another
+resume for that Node using the advanced cursor map until a response returns
+`hasMore: false`.
+
+### Historical Session Pagination
+
+Historical Pi session message responses must attach a stable `sourceIndex` to
+each message. `sourceIndex` is the zero-based index of that message in the
+underlying session message stream / JSONL message list; it is not the index in
+the current page. When a response includes `nextBeforeIndex`, that value is the
+start index of the returned page and can be used as the cursor for loading older
+messages.
+
+Clients must dedupe paginated historical messages by `sourceIndex` within the
+owning task/session. Content signatures such as role + text + parts are allowed
+only as a compatibility fallback for old cached/session-preview records that do
+not yet carry `sourceIndex`.
+
+Historical `parts` are the lossless transcript source for tool rendering. A
+`toolCall` part must preserve the tool `name`, stable call `id`, and structured
+`input` payload when Pi provides them. The matching `toolResult` part must carry
+the same stable `id` (from `id`, `toolCallId`, or equivalent Pi fields), plus
+`name`, `status`, and result `text`, so clients can pair calls/results without
+guessing from display text.
 
 ### Event
 
@@ -189,6 +247,11 @@ Node returns:
   }
 }
 ```
+
+`streamingText` and `streamingDelta` are lossless protocol fields. Node must not
+truncate or replace them before appending the event or sending it to clients.
+Clients may limit the visible render window for performance, but the event
+payload and projected task state must retain the complete received text.
 
 Client must apply an event only when `seq > localCursor[nodeId][streamId]`, then
 advance the cursor to `seq` and persist cursors with low-frequency batching.
@@ -225,6 +288,18 @@ Supported command payload `type` values:
 
 `requestId` is the idempotency key. Node records it in `command_requests`.
 
+### Heartbeat / Half-Open Detection
+
+Client-to-Hub and Node-to-Hub sockets both use protocol `ping` / `pong` to
+detect half-open mobile or Wi-Fi transitions. The interval is 15 seconds and the
+maximum missed pong count is 2, so a silent connection should be detected in
+about 30 seconds. Reconnect backoff remains exponential from 1 second to 30
+seconds, with jitter.
+
+Flutter app foreground resume should force a reconnect/resume even when the
+socket object still claims to be connected, because mobile backgrounding can
+leave a stale TCP connection that will not fail until heartbeat timeout.
+
 ## 4. Validation & Error Matrix
 
 | Condition | Behavior |
@@ -241,6 +316,8 @@ Supported command payload `type` values:
 | Command missing payload `type` | Node returns protocol `error` with `code: missing_command_type` |
 | Duplicate command `requestId` | Node returns stored result and does not repeat the command |
 | `seq <= cursor` on Client | Client ignores event as duplicate/replay |
+| Resume cursor predates retained event window | Node returns `truncatedStreams[]` with latest task snapshot when available |
+| 2 consecutive heartbeat pongs are missed | Peer closes the socket and schedules reconnect/resume |
 | Direct-mode Node tests | Node must not block socket bind on real Pi capability loading |
 | Old incompatible `tasks` table exists | Node drops only the incompatible legacy table, then creates the new schema |
 
@@ -250,6 +327,11 @@ Supported command payload `type` values:
 `hello.payload.tenantKey` → Client connects with the same key → Hub returns node
 summaries → Client sends `resume` → Node returns replay events where
 `seq > cursor` → Client applies them and advances cursors.
+
+**Base**: Client resumes with a cursor older than Node's retained events. Node
+returns a `truncatedStreams` snapshot for that stream, Client applies the
+snapshot first, advances the cursor to `latestSeq`, and ignores older replay
+events from the same response.
 
 **Base**: Pi RPC capability loading fails. Node still registers with `agents:
 ["pi"]` and empty capability arrays. Task commands can still run with Pi defaults.
@@ -263,16 +345,19 @@ registration and inject client-visible messages.
 - **Shared**: generated `messages.g.dart` includes the protocol message types,
   `kind`, and default `protocolVersion`.
 - **Node DB**: `test/persistence/node_db_test.dart` must assert new tables exist,
-  incompatible legacy tables are migrated, and `appendEvent/eventsAfter` preserve
-  per-stream seq.
+  incompatible legacy tables are migrated, `appendEvent/eventsAfter` preserve
+  per-stream seq and global insertion order, and purged streams produce
+  `truncatedStreams` snapshots.
 - **Node daemon**: `test/daemon_sync_pi_only_test.dart` must assert protocol
-  `task.create` emits `event` envelopes and `resume` replays persisted events.
+  `task.create` emits `event` envelopes, `resume` replays persisted events, and
+  resume pagination sets `hasMore` with exactly one page of events.
 - **Hub**: `test/server_test.dart` must assert protocol `hello` registration,
   tenant-key rejection, unauthenticated route rejection, `node:<id>` routing,
   and `to: client` routing.
 - **Client**: `test/providers/node_provider_sync_test.dart` must assert protocol
-  events append output, advance cursor, ignore duplicate seq, and block connect
-  until a tenant key is configured.
+  events append output, advance cursor, ignore duplicate seq, apply truncated
+  stream snapshots before replay events, re-resume with advanced cursors when
+  `hasMore` is true, and block connect until a tenant key is configured.
 - **Manual e2e**: `node/test/e2e/e2e_test.dart` requires a live daemon at
   `ws://localhost:9000/ws`; do not treat plain `dart test` failure for that file
   as a unit-test regression without starting the daemon first.

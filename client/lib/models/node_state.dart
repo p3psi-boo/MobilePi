@@ -133,7 +133,10 @@ class PiSessionInfo {
                 (e) =>
                     PiSessionMessageInfo.fromJson(Map<String, dynamic>.from(e)),
               )
-              .where((message) => message.text.trim().isNotEmpty)
+              .where(
+                (message) =>
+                    message.text.trim().isNotEmpty || message.parts.isNotEmpty,
+              )
               .toList() ??
           const <PiSessionMessageInfo>[],
     );
@@ -168,33 +171,47 @@ class MessagePart {
   final MessagePartType type;
   final String? text;
   final String? name;
+  final String? id;
+  final Map<String, dynamic>? input;
   final String? status;
 
   const MessagePart.text(this.text)
     : type = MessagePartType.text,
       name = null,
+      id = null,
+      input = null,
       status = null;
 
   const MessagePart.thinking(this.text)
     : type = MessagePartType.thinking,
       name = null,
+      id = null,
+      input = null,
       status = null;
 
-  const MessagePart.toolCall(this.name)
+  const MessagePart.toolCall(this.name, {this.id, this.input})
     : type = MessagePartType.toolCall,
       text = null,
       status = null;
 
-  const MessagePart.toolResult({this.name, this.status, this.text})
-    : type = MessagePartType.toolResult;
+  const MessagePart.toolResult({this.name, this.id, this.status, this.text})
+    : type = MessagePartType.toolResult,
+      input = null;
 
   factory MessagePart.fromJson(Map<String, dynamic> json) {
     final t = json['type']?.toString();
     return switch (t) {
       'thinking' => MessagePart.thinking(json['text']?.toString()),
-      'toolCall' => MessagePart.toolCall(json['name']?.toString()),
+      'toolCall' => MessagePart.toolCall(
+        json['name']?.toString(),
+        id: json['id']?.toString(),
+        input: json['input'] is Map
+            ? Map<String, dynamic>.from(json['input'] as Map)
+            : null,
+      ),
       'toolResult' => MessagePart.toolResult(
         name: json['name']?.toString(),
+        id: json['id']?.toString(),
         status: json['status']?.toString(),
         text: json['text']?.toString(),
       ),
@@ -206,10 +223,16 @@ class MessagePart {
     return switch (type) {
       MessagePartType.text => {'type': 'text', 'text': text},
       MessagePartType.thinking => {'type': 'thinking', 'text': text},
-      MessagePartType.toolCall => {'type': 'toolCall', 'name': name},
+      MessagePartType.toolCall => {
+        'type': 'toolCall',
+        'name': name,
+        if (id != null) 'id': id,
+        if (input != null) 'input': input,
+      },
       MessagePartType.toolResult => {
         'type': 'toolResult',
         'name': name,
+        if (id != null) 'id': id,
         'status': status,
         'text': text,
       },
@@ -224,6 +247,7 @@ class PiSessionMessageInfo {
   final DateTime? timestamp;
   final String? model;
   final UsageInfo? usage;
+  final int? sourceIndex;
 
   /// Structured content blocks — the authoritative data source for rendering.
   /// When non-empty, clients should use these instead of regex-parsing [text].
@@ -235,6 +259,7 @@ class PiSessionMessageInfo {
     this.timestamp,
     this.model,
     this.usage,
+    this.sourceIndex,
     this.parts = const [],
   });
 
@@ -247,6 +272,9 @@ class PiSessionMessageInfo {
       usage: json['usage'] is Map
           ? UsageInfo.fromJson(Map<String, dynamic>.from(json['usage'] as Map))
           : null,
+      sourceIndex: json['sourceIndex'] is int
+          ? json['sourceIndex'] as int
+          : int.tryParse(json['sourceIndex']?.toString() ?? ''),
       parts:
           (json['parts'] as List<dynamic>?)
               ?.whereType<Map>()
@@ -254,6 +282,19 @@ class PiSessionMessageInfo {
               .toList() ??
           const [],
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'role': role,
+      'text': text,
+      if (timestamp != null) 'timestamp': timestamp!.toIso8601String(),
+      if (model != null) 'model': model,
+      if (usage != null) 'usage': usage!.toJson(),
+      if (sourceIndex != null) 'sourceIndex': sourceIndex,
+      if (parts.isNotEmpty)
+        'parts': parts.map((part) => part.toJson()).toList(),
+    };
   }
 
   String get structuredPreviewText {

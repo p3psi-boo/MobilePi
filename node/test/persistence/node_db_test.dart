@@ -102,11 +102,92 @@ void main() {
         expect(other.seq, 1);
 
         final replay = db.eventsAfter({'task:1': 1});
-        expect(replay.map((event) => event.type), ['task.completed']);
-        expect(replay.single.payload['status'], 'completed');
+        expect(replay.map((event) => '${event.streamId}:${event.type}'), [
+          'task:1:task.completed',
+          'task:2:task.output.delta',
+        ]);
+        expect(replay.first.payload['status'], 'completed');
 
         db.close();
       },
     );
+
+    test(
+      'eventsAfter preserves global insertion order across streams',
+      () async {
+        final db = NodeDatabase(dbPath: testDbPath);
+        await db.initialize();
+
+        db.appendEvent(
+          streamId: 'task:z',
+          type: 'task.output.delta',
+          payload: {'taskId': 'z', 'streamingDelta': 'first'},
+        );
+        db.appendEvent(
+          streamId: 'task:a',
+          type: 'task.output.delta',
+          payload: {'taskId': 'a', 'streamingDelta': 'second'},
+        );
+        db.appendEvent(
+          streamId: 'task:z',
+          type: 'task.completed',
+          payload: {'taskId': 'z', 'status': 'completed'},
+        );
+
+        final firstPage = db.eventsAfter({'task:z': 0, 'task:a': 0}, limit: 1);
+        expect(firstPage.map((event) => event.streamId), ['task:z']);
+        expect(firstPage.single.payload['streamingDelta'], 'first');
+
+        final replay = db.eventsAfter({'task:z': 1, 'task:a': 0});
+        expect(replay.map((event) => '${event.streamId}:${event.seq}'), [
+          'task:a:1',
+          'task:z:2',
+        ]);
+
+        db.close();
+      },
+    );
+
+    test('truncatedStreams returns task snapshot after event purge', () async {
+      final db = NodeDatabase(dbPath: testDbPath);
+      await db.initialize();
+
+      db.upsertTask(
+        taskId: '1',
+        streamId: 'task:1',
+        agentType: 'pi',
+        title: 'Recover me',
+        status: 'running',
+        projectPath: '/repo',
+        model: 'provider/model',
+      );
+      final old = DateTime.now().toUtc().subtract(const Duration(days: 30));
+      db.appendEvent(
+        streamId: 'task:1',
+        type: 'task.created',
+        payload: {'taskId': '1', 'status': 'running'},
+        createdAt: old,
+      );
+      db.appendEvent(
+        streamId: 'task:1',
+        type: 'task.output.delta',
+        payload: {'taskId': '1', 'status': 'running', 'streamingDelta': 'old'},
+        createdAt: old,
+      );
+      db.purgeOldEvents(maxAgeDays: 7);
+
+      final truncated = db.truncatedStreams({'task:1': 0});
+      expect(truncated, hasLength(1));
+      expect(truncated.single.streamId, 'task:1');
+      expect(truncated.single.requestedSeq, 0);
+      expect(truncated.single.fromSeq, isNull);
+      expect(truncated.single.latestSeq, 2);
+      expect(truncated.single.snapshot?.seq, 2);
+      expect(truncated.single.snapshot?.type, 'task.snapshot');
+      expect(truncated.single.snapshot?.payload['title'], 'Recover me');
+      expect(truncated.single.snapshot?.payload['projectPath'], '/repo');
+
+      db.close();
+    });
   });
 }

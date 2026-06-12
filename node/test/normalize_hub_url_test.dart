@@ -2,6 +2,13 @@ import 'package:mobilepi_node/daemon.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('NodeDaemon heartbeat contract', () {
+    test('detects half-open Hub connections within about 30 seconds', () {
+      expect(NodeDaemon.hubHeartbeatInterval, const Duration(seconds: 15));
+      expect(NodeDaemon.maxHubMissedPongs, 2);
+    });
+  });
+
   group('NodeDaemon.normalizeHubUrl', () {
     test('keeps IPv4 host and explicit path', () {
       expect(

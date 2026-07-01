@@ -4,20 +4,41 @@ import 'package:provider/provider.dart';
 
 import 'providers/node_provider.dart';
 import 'screens/dashboard_screen.dart';
+import 'screens/task_detail_screen.dart';
+import 'services/notification_service.dart';
 import 'theme/app_tokens.dart';
 
 /// MobilePi 客户端根组件
 ///
 /// 视觉灵感来自 Claude Mobile：
-/// - 暖色奶油 / 珊瑚色调，弱化“紫色 Material”默认观感
+/// - 暖色奶油 / 珊瑚色调，弱化”紫色 Material”默认观感
 /// - 极柔和的卡片边框 + 圆角，强调留白
 /// - 顶部 AppBar 与 Surface 颜色融为一体，去掉阴影
-class MobilePiApp extends StatelessWidget {
+final navigatorKey = GlobalKey<NavigatorState>();
+
+class MobilePiApp extends StatefulWidget {
   const MobilePiApp({super.key, this.provider});
 
   /// Optional provider override for widget tests. Production uses the default
   /// `NodeProvider` owned by the root provider.
   final NodeProvider? provider;
+
+  @override
+  State<MobilePiApp> createState() => _MobilePiAppState();
+}
+
+class _MobilePiAppState extends State<MobilePiApp> {
+  @override
+  void initState() {
+    super.initState();
+    NotificationService.instance.onNotificationTap = (taskId) {
+      navigatorKey.currentState?.push(
+        MaterialPageRoute(
+          builder: (_) => TaskDetailScreen(taskId: taskId),
+        ),
+      );
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -46,6 +67,7 @@ class MobilePiApp extends StatelessWidget {
         );
 
     final app = MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'MobilePi',
       debugShowCheckedModeBanner: false,
       theme: _buildTheme(lightColorScheme, Brightness.light, lightTokens),
@@ -53,7 +75,7 @@ class MobilePiApp extends StatelessWidget {
       home: const _AppLifecycleReconnector(child: DashboardScreen()),
     );
 
-    final injectedProvider = provider;
+    final injectedProvider = widget.provider;
     if (injectedProvider != null) {
       return ChangeNotifierProvider.value(value: injectedProvider, child: app);
     }

@@ -3,9 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nur.url = "github:p3psi-boo/nur";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nur }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -68,7 +69,7 @@
           default = pkgs.mkShell {
             name = "dart-flutter-devshell";
 
-            packages = with pkgs; [
+            packages = (with pkgs; [
               # ── Dart & Flutter SDKs ─────────────────────────
               dart
               flutter
@@ -92,7 +93,8 @@
               gtk3
               glib
               pcre2
-            ] ++ linuxNativeDeps ++ darwinNativeDeps;
+            ] ++ linuxNativeDeps ++ darwinNativeDeps)
+            ++ [ nur.packages.${system}.fdb ];
 
             shellHook = ''
               # ── Environment Variables ───────────────────────
@@ -128,7 +130,7 @@
               echo -e "$CYAN║$RESET   $YELLOW➜$RESET Flutter: $FLUTTER_VER                           $CYAN║$RESET"
               echo -e "$CYAN║$RESET   $YELLOW➜$RESET Java:    $JAVA_VER                              $CYAN║$RESET"
               echo -e "$CYAN╠════════════════════════════════════════════════════════════════════╣$RESET"
-              echo -e "$CYAN║$RESET   Available: dart, flutter, java, adb, just, git, curl, wget, make, cmake, ninja   $CYAN║$RESET"
+              echo -e "$CYAN║$RESET   Available: dart, flutter, java, adb, fdb, just, git, curl, wget, make, cmake, ninja   $CYAN║$RESET"
               echo -e "$CYAN║$RESET   FLUTTER_ROOT → $BLUE$FLUTTER_ROOT$RESET              $CYAN║$RESET"
               echo -e "$CYAN║$RESET   JAVA_HOME    → $BLUE$JAVA_HOME$RESET              $CYAN║$RESET"
               echo -e "$CYAN╚════════════════════════════════════════════════════════════════════╝$RESET"

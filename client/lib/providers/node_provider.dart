@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding, AppLifecycleState;
 import 'package:logging/logging.dart';
 import 'package:mobilepi_shared/mobilepi_shared.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/node_state.dart';
+import '../services/notification_service.dart';
 import '../services/session_cache.dart';
 import '../services/websocket_service.dart';
 
@@ -833,6 +835,10 @@ class NodeProvider extends ChangeNotifier {
     }
     _scheduleSessionCacheSave();
 
+    // Notify user when task status transitions to a terminal/attention state
+    // while the app is in the background.
+    _maybeNotifyStatusTransition(existing: existing, task: _tasks[taskId]);
+
     if (incremental) {
       if (!notify) {
         _pendingStreamingTaskNotifications.add(taskId);
@@ -869,6 +875,49 @@ class NodeProvider extends ChangeNotifier {
         progressPercent != null ||
         linesAdded != null ||
         linesRemoved != null;
+  }
+
+  void _maybeNotifyStatusTransition({
+    required TaskState? existing,
+    required TaskState? task,
+  }) {
+    if (task == null) return;
+    final prevStatus = existing?.status;
+    final newStatus = task.status;
+    if (prevStatus == newStatus) return;
+
+    // Only notify for terminal/attention states.
+    const notifyStatuses = {'completed', 'error', 'waitingDecision'};
+    if (!notifyStatuses.contains(newStatus)) return;
+
+    // Only notify when app is in background.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == AppLifecycleState.resumed) return;
+
+    String title;
+    if (newStatus == 'completed') {
+      title = '任务完成';
+    } else if (newStatus == 'error') {
+      title = '任务失败';
+    } else if (newStatus == 'waitingDecision') {
+      title = '需要你的决策';
+    } else {
+      return;
+    }
+    final body = task.title;
+    final errorText = newStatus == 'error'
+        ? (task.streamingText ?? '').trim()
+        : null;
+    final fullBody = errorText != null && errorText.isNotEmpty
+        ? '$body\n${errorText.length > 100 ? '${errorText.substring(0, 100)}…' : errorText}'
+        : body;
+
+    NotificationService.instance.showTaskNotification(
+      taskId: task.id,
+      title: title,
+      body: fullBody,
+      isError: newStatus == 'error',
+    );
   }
 
   List<MessagePart>? _structuredStreamingParts({

@@ -32,6 +32,9 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   final _selectedModel = ValueNotifier<String?>(null); // null = node default
   bool _edgeSwipeActive = false;
   double _edgeSwipeDistance = 0;
+  bool _errorCardDismissed = false;
+  bool _retryMode = false;
+  final _outputViewKey = GlobalKey<_OutputViewState>();
 
   @override
   void dispose() {
@@ -53,6 +56,18 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
       model: _selectedModel.value,
     );
     _inputController.clear();
+    setState(() => _retryMode = false);
+  }
+
+  void _activateRetry(TaskState task) {
+    final lastUserMsg = task.messages
+        .lastWhere((m) => m.role == 'user', orElse: () => task.messages.last);
+    _inputController.text = lastUserMsg.text;
+    _inputController.selection = TextSelection.collapsed(
+      offset: _inputController.text.length,
+    );
+    _inputFocusNode.requestFocus();
+    setState(() => _retryMode = true);
   }
 
   @override
@@ -80,12 +95,21 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
           child: Scaffold(
             appBar: PreferredSize(
               preferredSize: const Size.fromHeight(kToolbarHeight),
-              child: _TaskAppBar(taskId: widget.taskId),
+              child: _TaskAppBar(
+                taskId: widget.taskId,
+                outputViewKey: _outputViewKey,
+              ),
             ),
             body: Column(
               children: [
                 TaskStatusBar(taskId: widget.taskId),
-                Expanded(child: _OutputView(taskId: widget.taskId)),
+                Expanded(child: _OutputView(key: _outputViewKey, taskId: widget.taskId)),
+                if (task.status == 'error' && !_errorCardDismissed)
+                  _TaskErrorCard(
+                    task: task,
+                    onRetry: () => _activateRetry(task),
+                    onDismiss: () => setState(() => _errorCardDismissed = true),
+                  ),
                 const _TaskLogDrawerHandle(),
                 _TaskInputBarWrapper(
                   taskId: widget.taskId,
@@ -95,6 +119,11 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                   onModelChanged: (m) => _selectedModel.value = m,
                   keyboardOpen: keyboardOpen,
                   onSend: _send,
+                  retryMode: _retryMode,
+                  onCancelRetry: () {
+                    _inputController.clear();
+                    setState(() => _retryMode = false);
+                  },
                 ),
               ],
             ),
@@ -213,7 +242,8 @@ class _TaskLogDrawerHandle extends StatelessWidget {
 
 class _TaskAppBar extends StatelessWidget {
   final String taskId;
-  const _TaskAppBar({required this.taskId});
+  final GlobalKey<_OutputViewState> outputViewKey;
+  const _TaskAppBar({required this.taskId, required this.outputViewKey});
 
   @override
   Widget build(BuildContext context) {
@@ -224,10 +254,17 @@ class _TaskAppBar extends StatelessWidget {
         final cs = Theme.of(ctx).colorScheme;
         final title = task?.displayTitle ?? '';
         final isRunning = task?.status == 'running';
+        final hasMessages = (task?.messages.length ?? 0) > 0;
         return AppBar(
           title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
           centerTitle: true,
           actions: [
+            if (hasMessages)
+              IconButton(
+                icon: const Icon(Icons.format_list_bulleted_rounded),
+                tooltip: '对话导航',
+                onPressed: () => _showTurnNavigator(ctx, task!),
+              ),
             if (isRunning && task != null)
               IconButton(
                 icon: Icon(Icons.stop_circle, color: cs.error),
@@ -235,6 +272,108 @@ class _TaskAppBar extends StatelessWidget {
                 onPressed: () => _confirmPanic(ctx, task),
               ),
           ],
+        );
+      },
+    );
+  }
+
+  void _showTurnNavigator(BuildContext context, TaskState task) {
+    final outputState = outputViewKey.currentState;
+    if (outputState == null) return;
+    final entries = outputState.getTurnEntries(task.messages);
+    if (entries.isEmpty) return;
+
+    HapticFeedback.selectionClick();
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        final cs = theme.colorScheme;
+        return SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.format_list_bulleted_rounded,
+                      size: 18,
+                      color: cs.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '对话导航',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${entries.length} 条',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: entries.length,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemBuilder: (context, i) {
+                    final entry = entries[i];
+                    final preview = entry.preview.length > 60
+                        ? '${entry.preview.substring(0, 60)}…'
+                        : entry.preview;
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(
+                        entry.isUser
+                            ? Icons.person_outline_rounded
+                            : Icons.auto_awesome,
+                        size: 18,
+                        color: entry.isUser
+                            ? cs.primary
+                            : cs.secondary,
+                      ),
+                      title: Text(
+                        preview.isEmpty ? '(空)' : preview,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                      subtitle: entry.isUser
+                          ? null
+                          : Text(
+                              '${entry.messageCount} 条消息',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                      trailing: Text(
+                        '#${i + 1}',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        outputState.scrollToTurn(entry.index);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -277,6 +416,8 @@ class _TaskInputBarWrapper extends StatelessWidget {
   final ValueChanged<String?> onModelChanged;
   final bool keyboardOpen;
   final VoidCallback onSend;
+  final bool retryMode;
+  final VoidCallback? onCancelRetry;
 
   const _TaskInputBarWrapper({
     required this.taskId,
@@ -286,6 +427,8 @@ class _TaskInputBarWrapper extends StatelessWidget {
     required this.onModelChanged,
     required this.keyboardOpen,
     required this.onSend,
+    this.retryMode = false,
+    this.onCancelRetry,
   });
 
   @override
@@ -311,6 +454,8 @@ class _TaskInputBarWrapper extends StatelessWidget {
                   onModelChanged: onModelChanged,
                   keyboardOpen: keyboardOpen,
                   onSend: onSend,
+                  retryMode: retryMode,
+                  onCancelRetry: onCancelRetry,
                 );
               },
             );
@@ -324,7 +469,7 @@ class _TaskInputBarWrapper extends StatelessWidget {
 /// 输出流视图
 class _OutputView extends StatefulWidget {
   final String taskId;
-  const _OutputView({required this.taskId});
+  const _OutputView({super.key, required this.taskId});
 
   @override
   State<_OutputView> createState() => _OutputViewState();
@@ -352,11 +497,66 @@ class _OutputViewState extends State<_OutputView> {
   /// tracks additional user-expanded turns.
   final _expandedTurnKeys = <int>{};
 
+  /// GlobalKeys for each turn widget, used by jump-to-turn navigation.
+  final _turnGlobalKeys = <int, GlobalKey>{};
+
+  /// When true, skip the 24K character cap for streaming content.
+  bool _showFullStreaming = false;
+
   /// Stick-to-bottom state machine — mirrors howcode's shouldStickToBottom.
   bool _shouldStickToBottom = true;
   final _showScrollToBottom = ValueNotifier<bool>(false);
   bool _programmaticScroll = false;
   static const _autoScrollThreshold = 50.0;
+
+  void scrollToTurn(int idx) {
+    final key = _turnGlobalKeys[idx];
+    if (key?.currentContext == null) return;
+    _setShouldStickToBottom(false);
+    Scrollable.ensureVisible(
+      key!.currentContext!,
+      alignment: 0.0,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+  }
+
+  List<_TurnEntry> getTurnEntries(List<PiSessionMessageInfo> messages) {
+    final entries = <_TurnEntry>[];
+    for (var idx = 0; idx < messages.length; idx++) {
+      final msg = messages[idx];
+      if (idx > 0 && msg.role != 'user' && messages[idx - 1].role != 'user') {
+        continue;
+      }
+      if (msg.role == 'user') {
+        entries.add(_TurnEntry(
+          index: idx,
+          isUser: true,
+          preview: msg.text.replaceAll('\n', ' ').trim(),
+          messageCount: 1,
+        ));
+      } else {
+        var end = idx;
+        while (end < messages.length && messages[end].role != 'user') {
+          end++;
+        }
+        final group = messages.sublist(idx, end);
+        final firstNonTool = group.firstWhere(
+          (m) => m.role != 'toolResult',
+          orElse: () => group.first,
+        );
+        entries.add(_TurnEntry(
+          index: idx,
+          isUser: false,
+          preview: firstNonTool.structuredPreviewText
+              .replaceAll('\n', ' ')
+              .trim(),
+          messageCount: group.length,
+        ));
+      }
+    }
+    return entries;
+  }
 
   /// 缓存 provider 引用，避免在 dispose 中使用 context 查找
   /// （dispose 时 Element 已非 active，会导致
@@ -631,6 +831,7 @@ class _OutputViewState extends State<_OutputView> {
                               _expandedTurnKeys.add(idx);
                               _setShouldStickToBottom(false);
                             }),
+                            turnGlobalKeys: _turnGlobalKeys,
                           );
                         },
                       );
@@ -715,11 +916,17 @@ class _OutputViewState extends State<_OutputView> {
                               omittedChars:
                                   _streamingPartsTextLength(streamingParts) -
                                   _maxRenderedStreamingChars,
+                              expanded: _showFullStreaming,
+                              onToggle: () => setState(() {
+                                _showFullStreaming = !_showFullStreaming;
+                              }),
                             ),
                           if (hasStreamingParts)
                             ..._buildStreamingPartWidgets(
                               context,
-                              streamingParts,
+                              _showFullStreaming
+                                  ? streamingParts
+                                  : _capStreamingPartsForRender(streamingParts),
                               isFinal: !isRunning,
                             ),
                           // Status label (compaction, retry, etc.)
@@ -883,12 +1090,14 @@ class _HistoryMessagesSliver extends StatelessWidget {
   final String? fallbackModel;
   final Set<int> expandedTurnKeys;
   final ValueChanged<int> onExpand;
+  final Map<int, GlobalKey> turnGlobalKeys;
 
   const _HistoryMessagesSliver({
     required this.messages,
     required this.fallbackModel,
     required this.expandedTurnKeys,
     required this.onExpand,
+    required this.turnGlobalKeys,
   });
 
   @override
@@ -910,8 +1119,9 @@ class _HistoryMessagesSliver extends StatelessWidget {
 
           final isUser = msg.role == 'user';
           if (isUser) {
+            turnGlobalKeys.putIfAbsent(idx, () => GlobalKey());
             return _MessageItem(
-              key: ValueKey('msg_$idx'),
+              key: turnGlobalKeys[idx],
               message: msg,
               isUser: true,
               isFinal: true,
@@ -943,16 +1153,17 @@ class _HistoryMessagesSliver extends StatelessWidget {
           final isLatest = idx == lastNonUserIdx;
           final isExpanded = isLatest || expandedTurnKeys.contains(idx);
 
+          turnGlobalKeys.putIfAbsent(idx, () => GlobalKey());
           if (isExpanded) {
             return _AgentTurnWidget(
-              key: ValueKey(turnKey),
+              key: turnGlobalKeys[idx],
               messages: group,
               modelName: msg.model ?? fallbackModel,
             );
           }
 
           return _CollapsedTurnRow(
-            key: ValueKey('collapsed_$idx'),
+            key: turnGlobalKeys[idx],
             turnKey: turnKey,
             messages: group,
             modelName: msg.model ?? fallbackModel,
@@ -998,6 +1209,49 @@ int _streamingPartsTextLength(List<MessagePart> parts) {
     length += part.text?.length ?? 0;
   }
   return length;
+}
+
+/// Cap the total rendered text across text/thinking streaming parts to
+/// [_maxRenderedStreamingChars], keeping the **tail** (most recent output).
+/// Tool calls / results are passed through unchanged — only the long-form
+/// text/thinking parts that dominate layout cost are truncated. This makes the
+/// "已省略 Nk 字符" notice truthful and bounds the worst-case paragraph length
+/// that `_LivePlainText` ever has to lay out.
+///
+/// Truncation is view-only: the provider still accumulates the full text, and
+/// the finalized message (rendered via `PiMarkdown` once the turn completes)
+/// shows everything.
+List<MessagePart> _capStreamingPartsForRender(List<MessagePart> parts) {
+  final total = _streamingPartsTextLength(parts);
+  if (total <= _maxRenderedStreamingChars) return parts;
+
+  var budget = _maxRenderedStreamingChars;
+  // Walk in reverse so the tail is preserved; earlier text/thinking parts get
+  // dropped first once the budget is exhausted.
+  final result = <MessagePart>[];
+  for (final part in parts.reversed) {
+    final isTexty = part.type == MessagePartType.text ||
+        part.type == MessagePartType.thinking;
+    if (!isTexty) {
+      result.add(part);
+      continue;
+    }
+    final t = part.text ?? '';
+    if (budget <= 0) continue; // drop older text parts entirely
+    if (t.length <= budget) {
+      result.add(part);
+      budget -= t.length;
+    } else {
+      // Keep only the tail of this part; an ellipsis signals the cut.
+      result.add(
+        part.type == MessagePartType.thinking
+            ? MessagePart.thinking('…${t.substring(t.length - budget)}')
+            : MessagePart.text('…${t.substring(t.length - budget)}'),
+      );
+      budget = 0;
+    }
+  }
+  return result.reversed.toList();
 }
 
 /// Streaming content rendered from protocol-structured parts.
@@ -1088,6 +1342,14 @@ List<Widget> _buildHistoryPartWidgets(
   return widgets;
 }
 
+/// Streaming plain text rendered as line-separated chunks so that only the
+/// last (still-growing) line re-lays-out on each delta. Earlier lines keep a
+/// stable key + content and are reused by Flutter's element diffing, avoiding
+/// the O(n) full-paragraph re-layout that a single growing `Text` would incur.
+///
+/// Without this, frame build time was measured (profile timeline) to jump from
+/// ~3ms to ~17ms once streaming text grew past a few hundred chars, because
+/// `RenderParagraph` re-measured the whole growing string every 80ms tick.
 class _LivePlainText extends StatelessWidget {
   final String text;
   final TextStyle? style;
@@ -1096,7 +1358,42 @@ class _LivePlainText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SelectionArea(child: Text(text, style: style));
+    // Fast path: short or single-line text — one Text, no Column overhead.
+    if (text.length < 64 && !text.contains('\n')) {
+      return SelectionArea(child: Text(text, style: style));
+    }
+
+    return SelectionArea(
+      child: _LiveTextLines(text: text, style: style),
+    );
+  }
+}
+
+/// Renders `text` split on `\n` as one `Text` per line, each keyed by its line
+/// index. A trailing newline yields an empty final line so the last visible
+/// line stays stable when new content appends to it.
+class _LiveTextLines extends StatelessWidget {
+  final String text;
+  final TextStyle? style;
+
+  const _LiveTextLines({required this.text, required this.style});
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = text.split('\n');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (int i = 0; i < lines.length; i++)
+          Text(
+            // Empty trailing line keeps a tiny strut so the column reserves no
+            // spurious gap; content arrives on the next delta.
+            lines[i],
+            key: ValueKey('line_$i'),
+            style: style,
+          ),
+      ],
+    );
   }
 }
 
@@ -1136,20 +1433,81 @@ class _StatusLabel extends StatelessWidget {
 
 class _OutputTruncationNotice extends StatelessWidget {
   final int omittedChars;
+  final bool expanded;
+  final VoidCallback onToggle;
 
-  const _OutputTruncationNotice({required this.omittedChars});
+  const _OutputTruncationNotice({
+    required this.omittedChars,
+    required this.expanded,
+    required this.onToggle,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Text(
-        '已省略较早的 ${omittedChars ~/ 1000}k 字符，避免浏览器长帧；完整历史可从会话消息继续向上加载。',
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-          fontStyle: FontStyle.italic,
-        ),
+    final cs = theme.colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '已省略较早的 ${omittedChars ~/ 1000}k 字符',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: onToggle,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        expanded
+                            ? Icons.unfold_less_rounded
+                            : Icons.unfold_more_rounded,
+                        size: 14,
+                        color: cs.primary,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        expanded ? '收起' : '展开全部',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (expanded) ...[
+                const SizedBox(width: 8),
+                Text(
+                  '可能影响滚动性能',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1234,14 +1592,34 @@ class _CollapsedTurnRow extends StatelessWidget {
                           color: cs.onSurface.withValues(alpha: 0.6),
                         ),
                       ),
-                      if (toolCount > 0)
-                        Text(
-                          '$toolCount 个工具',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: cs.onSurfaceVariant.withValues(alpha: 0.4),
-                            fontSize: 10,
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${messages.length} 条消息',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: cs.onSurfaceVariant.withValues(alpha: 0.4),
+                              fontSize: 10,
+                            ),
                           ),
-                        ),
+                          if (toolCount > 0) ...[
+                            Text(
+                              ' · ',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: cs.onSurfaceVariant.withValues(alpha: 0.3),
+                                fontSize: 10,
+                              ),
+                            ),
+                            Text(
+                              '$toolCount 个工具',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: cs.onSurfaceVariant.withValues(alpha: 0.4),
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -1913,6 +2291,8 @@ class _InputBar extends StatelessWidget {
   final ValueChanged<String?> onModelChanged;
   final bool keyboardOpen;
   final VoidCallback onSend;
+  final bool retryMode;
+  final VoidCallback? onCancelRetry;
 
   const _InputBar({
     required this.controller,
@@ -1923,6 +2303,8 @@ class _InputBar extends StatelessWidget {
     required this.onModelChanged,
     required this.keyboardOpen,
     required this.onSend,
+    this.retryMode = false,
+    this.onCancelRetry,
   });
 
   @override
@@ -1951,6 +2333,43 @@ class _InputBar extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (retryMode) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: cs.error.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.refresh_rounded, size: 14, color: cs.error),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '重试模式 — 上次消息已预填',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: cs.error,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: onCancelRetry,
+                    child: Padding(
+                      padding: const EdgeInsets.all(2),
+                      child: Icon(
+                        Icons.close,
+                        size: 14,
+                        color: cs.error.withValues(alpha: 0.6),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+          ],
           SizedBox(
             height: 32,
             child: ListView.separated(
@@ -2517,4 +2936,115 @@ class _CommandListTile extends StatelessWidget {
       onTap: onTap,
     );
   }
+}
+
+class _TaskErrorCard extends StatelessWidget {
+  final TaskState task;
+  final VoidCallback onRetry;
+  final VoidCallback onDismiss;
+
+  const _TaskErrorCard({
+    required this.task,
+    required this.onRetry,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    final errorText = (task.streamingText ?? '').trim();
+    final displayError = errorText.isEmpty
+        ? '任务执行过程中发生错误'
+        : errorText.length > 200
+            ? '${errorText.substring(0, 200)}…'
+            : errorText;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: cs.error.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border(
+          left: BorderSide(color: cs.error, width: 3),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.error_outline, size: 18, color: cs.error),
+                const SizedBox(width: 8),
+                Text(
+                  '任务失败',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: cs.error,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const Spacer(),
+                InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: onDismiss,
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      Icons.close,
+                      size: 16,
+                      color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              displayError,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: cs.onSurface.withValues(alpha: 0.7),
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded, size: 16),
+                  label: const Text('重试'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                    textStyle: theme.textTheme.labelMedium,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TurnEntry {
+  final int index;
+  final bool isUser;
+  final String preview;
+  final int messageCount;
+
+  const _TurnEntry({
+    required this.index,
+    required this.isUser,
+    required this.preview,
+    required this.messageCount,
+  });
 }
